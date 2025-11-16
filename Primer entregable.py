@@ -151,7 +151,7 @@ def main():
 
     server_port = 5555
     messages = []
-    init_db = []
+    init_db()
     
     # Ejecutar el servidor en un hilo daemon
     server_thread = threading.Thread(target=server, args=(server_port, messages))
