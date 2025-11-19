@@ -147,7 +147,7 @@ def ver_camas_locales():
         if r[1] == 1:
             estado = f"OCUPADA por: {r[2]}"
         else:
-            estado = "🟢 LIBRE"
+            estado = "LIBRE"
         print(f"   Cama {r[0]}: {estado}")
 
 def ver_trabajadores_sociales():
@@ -194,7 +194,7 @@ def registrar_nuevo_paciente():
         ejecutar_transaccion(comando) # Simulado
         # Aquí deberías hacer el INSERT real en BD local también si quieres persistencia inmediata
         
-        print("✅ Paciente procesado localmente.")
+        print("Paciente procesado localmente.")
         propagar_transaccion(json.dumps(comando))
         
     except ValueError:
