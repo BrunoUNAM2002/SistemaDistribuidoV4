@@ -197,11 +197,6 @@ def init_test_database():
         # 7. Crear Usuarios
         print("Creando usuarios de autenticación...")
 
-        # Admin
-        admin = Usuario(username='admin', rol='admin', activo=True)
-        admin.set_password('admin123')
-        db.session.add(admin)
-
         # Doctores (uno por cada doctor)
         for i in range(1, 5):
             user = Usuario(username=f'doctor{i}', rol='doctor', id_relacionado=i, activo=True)
@@ -212,6 +207,12 @@ def init_test_database():
         for i in range(1, 5):
             user = Usuario(username=f'trabajador{i}', rol='trabajador_social', id_relacionado=i, activo=True)
             user.set_password('trab123')
+            db.session.add(user)
+
+        # Pacientes (algunos pacientes de prueba)
+        for i in range(1, 6):  # Primeros 5 pacientes pueden autenticarse
+            user = Usuario(username=f'paciente{i}', rol='paciente', id_relacionado=i, activo=True)
+            user.set_password('pac123')
             db.session.add(user)
 
         db.session.commit()
@@ -230,9 +231,12 @@ def init_test_database():
         print(f"Usuarios:            {Usuario.query.count()}")
         print("="*60)
         print("\nUsuarios de prueba:")
-        print("  admin / admin123")
-        print("  doctor1 / doc123")
-        print("  trabajador1 / trab123")
+        print("  DOCTORES:")
+        print("    doctor1, doctor2, doctor3, doctor4 / doc123")
+        print("  TRABAJADORES SOCIALES:")
+        print("    trabajador1, trabajador2, trabajador3, trabajador4 / trab123")
+        print("  PACIENTES:")
+        print("    paciente1, paciente2, paciente3, paciente4, paciente5 / pac123")
         print("="*60)
 
 if __name__ == '__main__':

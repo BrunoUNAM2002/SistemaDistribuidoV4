@@ -1,6 +1,7 @@
 # ============================================================================
 # CONSOLE-BASED DISTRIBUTED MEDICAL SYSTEM - REQUIREMENTS
 # Sistema de Consenso Distribuido con Interfaz de Consola
+# Versión 2.0 - Textual Modern TUI
 # ============================================================================
 
 # Flask core (without web server - just for app context and SQLAlchemy)
@@ -11,15 +12,77 @@ Werkzeug==3.0.1
 Flask-SQLAlchemy==3.1.1
 SQLAlchemy==2.0.23
 
-# Console UI (NEW - for terminal interface)
-rich==14.1.0
+# ============================================================================
+# TEXTUAL MODERN TUI FRAMEWORK (NEW v2.0)
+# ============================================================================
+
+# Core TUI Framework - Modern async-powered terminal UI
+textual>=6.6.0
+
+# Rich - Beautiful terminal formatting (dependency of Textual)
+rich>=14.2.0
+
+# ============================================================================
+# VISUALIZATION & GRAPHICS
+# ============================================================================
+
+# Terminal plotting and charts
+plotext==5.2.8
+
+# Fast ASCII charts for real-time data (sparklines)
+asciichartpy==1.5.25
+
+# Gradient text effects for rich terminals
+rich-gradient==0.3.6
+
+# ============================================================================
+# ANIMATIONS & EFFECTS
+# ============================================================================
+
+# Terminal text effects engine (typewriter, slide, beams, etc.)
+terminaltexteffects==0.10.1
+
+# ============================================================================
+# USER EXPERIENCE ENHANCEMENTS
+# ============================================================================
+
+# Audio feedback for notifications (cross-platform beeps)
+chime==0.7.0
+
+# Fuzzy finder for interactive search (command palette)
+iterfzf==1.4.0.0
+
+# ============================================================================
+# LEGACY CONSOLE UI (keeping for backward compatibility)
+# ============================================================================
+
+# Interactive prompts with arrow key navigation (used in old main.py)
 questionary==2.0.1
+
+# ============================================================================
+# SYSTEM & UTILITIES
+# ============================================================================
 
 # System metrics
 psutil==5.9.6
 
-# Utilities
+# Environment variables
 python-dotenv==1.0.0
+
+# ============================================================================
+# DEVELOPMENT & TESTING
+# ============================================================================
+
+# Async testing for Textual apps
+pytest==8.1.1
+pytest-asyncio==0.23.5
+
+# Snapshot testing for TUI visual regression
+pytest-textual-snapshot==0.4.0
+
+# Code quality
+black==24.2.0
+ruff==0.3.0
 
 # ============================================================================
 # NOTAS DE INSTALACIÓN
@@ -31,13 +94,8 @@ python-dotenv==1.0.0
 # Para desarrollo:
 #   pip install -r requirements.txt --upgrade
 #
-# ============================================================================
-# DEPENDENCIAS DEL SISTEMA BULLY SIMPLIFICADO
-# ============================================================================
-#
-# - psutil: Métricas del sistema (CPU, memoria, uptime)
-# - Flask-SocketIO: WebSockets para notificaciones en tiempo real
-# - Flask-SQLAlchemy: ORM para base de datos
+# Para instalar solo producción (sin dev tools):
+#   grep -v "^#" requirements.txt | grep -v "pytest\|black\|ruff" | pip install -r /dev/stdin
 #
 # ============================================================================
 # COMPATIBILIDAD
@@ -46,3 +104,9 @@ python-dotenv==1.0.0
 # Python 3.8+
 # Sistema operativo: Linux, macOS, Windows
 # Arquitectura: x86_64, ARM64
+#
+# NOTA: Textual requiere un terminal moderno con soporte para:
+# - 256 colores (recomendado: truecolor/16M colores)
+# - UTF-8 encoding
+# - Terminales recomendados: iTerm2, Windows Terminal, Kitty, Alacritty, WezTerm
+#

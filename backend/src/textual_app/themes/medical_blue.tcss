@@ -1,0 +1,163 @@
+/*
+ * Medical Blue Theme - Professional medical system theme
+ * Primary: Trust and professionalism
+ * Accent: Modern tech-forward look
+ */
+
+/* ==================== GLOBAL STYLES ==================== */
+Screen {
+    background: #F5F7FA;
+    color: #1A2332;
+}
+
+/* ==================== CONTAINERS ==================== */
+Container {
+    background: #FFFFFF;
+    border: solid #E4E9F2;
+    padding: 1 2;
+}
+
+Container:focus-within {
+    border: solid #0077BE;
+}
+
+/* ==================== BUTTONS ==================== */
+Button {
+    background: #0077BE;
+    color: #FFFFFF;
+    border: none;
+    padding: 0 2;
+    min-width: 16;
+}
+
+Button:hover {
+    background: #00A8E1;
+    text-style: bold;
+}
+
+Button.-primary {
+    background: #0077BE;
+}
+
+Button.-success {
+    background: #28A745;
+}
+
+Button.-warning {
+    background: #FFC107;
+    color: #1A2332;
+}
+
+Button.-error {
+    background: #DC3545;
+}
+
+/* ==================== INPUT FIELDS ==================== */
+Input {
+    background: #FFFFFF;
+    border: tall #E4E9F2;
+    padding: 0 1;
+    color: #1A2332;
+}
+
+Input:focus {
+    border: tall #0077BE;
+    background: #FAFBFC;
+}
+
+Input > .input--placeholder {
+    color: #8F9BB3;
+    text-style: italic;
+}
+
+Input > .input--cursor {
+    background: #0077BE;
+    color: #FFFFFF;
+}
+
+/* ==================== LABELS ==================== */
+Label {
+    color: #1A2332;
+    padding: 0 1;
+}
+
+.label-title {
+    text-style: bold;
+    color: #0077BE;
+}
+
+.label-success {
+    color: #28A745;
+    text-style: bold;
+}
+
+.label-error {
+    color: #DC3545;
+    text-style: bold;
+}
+
+/* ==================== HEADER & FOOTER ==================== */
+Header {
+    background: #0077BE;
+    color: #FFFFFF;
+    dock: top;
+    height: 3;
+}
+
+Footer {
+    background: #005A8C;
+    color: #FFFFFF;
+    dock: bottom;
+    height: 1;
+}
+
+/* ==================== SCREEN SPECIFIC ==================== */
+#splash-container {
+    background: #FFFFFF;
+    border: thick #0077BE;
+    padding: 2 4;
+}
+
+#splash-title {
+    text-style: bold;
+    color: #0077BE;
+    text-align: center;
+}
+
+#splash-cross {
+    color: #DC3545;
+    text-align: center;
+}
+
+#splash-logo {
+    color: #0077BE;
+    text-align: center;
+}
+
+#login-container {
+    background: #FFFFFF;
+    border: thick #0077BE;
+    padding: 2 4;
+    width: 50;
+}
+
+#login-title {
+    text-style: bold;
+    color: #0077BE;
+    text-align: center;
+    padding: 1 0;
+}
+
+.input-label {
+    color: #5A6C7D;
+    padding: 1 0 0 0;
+}
+
+#button-container {
+    align: center middle;
+    padding: 1 0;
+}
+
+*:focus {
+    border: solid #0077BE !important;
+}

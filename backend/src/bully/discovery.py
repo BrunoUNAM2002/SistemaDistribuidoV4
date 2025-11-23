@@ -104,7 +104,22 @@ class NodeDiscovery:
         self.recv_socket.bind(('', self.multicast_port))
 
         # Unirse al grupo multicast
-        mreq = struct.pack("4sl", socket.inet_aton(self.multicast_group), socket.INADDR_ANY)
+        # IMPROVED: En macOS, intentamos obtener la IP local para mejor compatibilidad
+        try:
+            # Intentar obtener IP de interfaz primaria (mejor para macOS)
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+
+            # Usar IP local para membership (mejor routing en macOS)
+            mreq = struct.pack("4s4s", socket.inet_aton(self.multicast_group), socket.inet_aton(local_ip))
+            logger.debug(f"[Node-{self.node_id}] [DISCOVERY] Joining multicast on interface {local_ip}")
+        except Exception as e:
+            # Fallback a INADDR_ANY si falla detección de IP
+            mreq = struct.pack("4sl", socket.inet_aton(self.multicast_group), socket.INADDR_ANY)
+            logger.debug(f"[Node-{self.node_id}] [DISCOVERY] Joining multicast on INADDR_ANY (fallback)")
+
         self.recv_socket.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
 
         # Iniciar threads
@@ -227,12 +242,19 @@ class NodeDiscovery:
             if sender_id == self.node_id:
                 sender_ip = addr[0]
 
-                # Verificar si no es un mensaje de loopback (mismo host)
-                import socket as sock
-                my_ip = sock.gethostbyname(sock.gethostname())
+                # IMPROVED: Verificar si es un mensaje de loopback (mismo host)
+                # En macOS, socket.gethostbyname() puede retornar IP LAN en lugar de 127.0.0.1
+                # Por eso verificamos múltiples variantes de localhost
+                is_loopback = (
+                    sender_ip == '127.0.0.1' or
+                    sender_ip == 'localhost' or
+                    sender_ip == '::1' or  # IPv6 localhost
+                    sender_ip.startswith('127.') or  # Cualquier IP en 127.0.0.0/8
+                    sender_ip == '0.0.0.0'
+                )
 
-                # Si es diferente IP o puerto, hay colisión
-                if sender_ip != my_ip and sender_ip != '127.0.0.1':
+                # Si NO es loopback, entonces es una colisión real de ID
+                if not is_loopback:
                     logger.warning(f"[Node-{self.node_id}] [DISCOVERY] ⚠️  ID COLLISION detected! Node {sender_id} at {sender_ip}")
 
                     # Notificar callback de colisión
@@ -243,7 +265,7 @@ class NodeDiscovery:
                             daemon=True
                         ).start()
 
-                # Ignorar el mensaje (no procesarlo como nodo diferente)
+                # Ignorar el mensaje (loopback o colisión) - no procesarlo como nodo diferente
                 return
 
             if msg_type == 'ANNOUNCE':
