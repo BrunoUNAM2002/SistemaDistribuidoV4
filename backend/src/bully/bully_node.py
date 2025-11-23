@@ -6,6 +6,7 @@ import logging
 from enum import Enum
 from typing import Dict, Optional
 from .communication import CommunicationManager, Message
+from .discovery import NodeDiscovery
 
 logger = logging.getLogger(__name__)
 
@@ -27,20 +28,38 @@ class BullyNode:
     6. Si nadie responde → declararse líder
     """
     
-    def __init__(self, node_id: int, cluster_nodes: Dict[int, tuple], 
-                 tcp_port: int, udp_port: int):
+    def __init__(self, node_id: int, cluster_nodes: Dict[int, tuple] = None,
+                 tcp_port: int = None, udp_port: int = None,
+                 use_discovery: bool = False,
+                 multicast_group: str = '224.0.0.100',
+                 multicast_port: int = 5005):
         """
         Inicializa nodo Bully.
-        
+
         Args:
-            node_id: ID de este nodo (1-4)
-            cluster_nodes: {node_id: (ip, tcp_port, udp_port)}
+            node_id: ID de este nodo
+            cluster_nodes: {node_id: (ip, tcp_port, udp_port)} (DEPRECATED - modo estático)
             tcp_port: Puerto TCP local para elecciones
             udp_port: Puerto UDP local para heartbeats
+            use_discovery: Si True, usa auto-descubrimiento dinámico
+            multicast_group: Grupo multicast para descubrimiento
+            multicast_port: Puerto multicast para descubrimiento
         """
         self.node_id = node_id
-        self.cluster_nodes = cluster_nodes
-        
+        self.use_discovery = use_discovery
+
+        # Modo dinámico vs estático
+        if use_discovery:
+            # Modo dinámico: cluster_nodes se llena automáticamente
+            self.cluster_nodes: Dict[int, tuple] = {}
+            self.discovery: Optional[NodeDiscovery] = None
+            logger.info(f"[Node-{node_id}] [BULLY] Dynamic mode - using auto-discovery")
+        else:
+            # Modo estático: usar cluster_nodes proporcionado
+            self.cluster_nodes = cluster_nodes if cluster_nodes else {}
+            self.discovery = None
+            logger.info(f"[Node-{node_id}] [BULLY] Static mode - using fixed cluster_nodes")
+
         # Estado del nodo
         self.state = NodeState.FOLLOWER
         self.current_leader: Optional[int] = None
@@ -50,29 +69,37 @@ class BullyNode:
         self.current_term = 0  # Term number para invalidar mensajes obsoletos
 
         # Configuración de timeouts
-        self.heartbeat_interval = 3   # Enviar heartbeat cada 3s (antes: 5s)
-        self.election_timeout = 10     # Sin heartbeat por 10s → elección (antes: 15s)
+        self.heartbeat_interval = 3   # Enviar heartbeat cada 3s
+        self.election_timeout = 10     # Sin heartbeat por 10s → elección
         self.last_heartbeat_received = time.time()
 
         # Tracking de nodos activos (para validación inteligente)
         self.node_last_seen: Dict[int, float] = {}
         self.grace_period = 30  # Segundos antes de aceptar líder de menor prioridad
-        for nid in cluster_nodes.keys():
+
+        # Inicializar tracking para nodos conocidos
+        for nid in self.cluster_nodes.keys():
             if nid != node_id:
                 self.node_last_seen[nid] = time.time()
 
+        # Guardar configuración de puertos para discovery
+        self.tcp_port = tcp_port
+        self.udp_port = udp_port
+        self.multicast_group = multicast_group
+        self.multicast_port = multicast_port
+
         # Communication manager
         self.comm = CommunicationManager(node_id, tcp_port, udp_port)
-        
+
         # Threads
         self.running = False
         self.heartbeat_thread: Optional[threading.Thread] = None
         self.monitor_thread: Optional[threading.Thread] = None
-        
+
         # Lock para operaciones críticas
         self.lock = threading.Lock()
 
-        logger.info(f"[Node-{node_id}] [BULLY] Node initialized")
+        logger.info(f"[Node-{node_id}] [BULLY] Node initialized (TCP:{tcp_port}, UDP:{udp_port})")
     
     def start(self):
         """Inicia el nodo Bully"""
@@ -87,6 +114,27 @@ class BullyNode:
         self.comm.register_tcp_handler('ELECTION', self._handle_election)
         self.comm.register_tcp_handler('COORDINATOR', self._handle_coordinator)
         self.comm.register_udp_handler('HEARTBEAT', self._handle_heartbeat)
+
+        # Iniciar discovery si estamos en modo dinámico
+        if self.use_discovery:
+            self.discovery = NodeDiscovery(
+                node_id=self.node_id,
+                tcp_port=self.tcp_port,
+                udp_port=self.udp_port,
+                multicast_group=self.multicast_group,
+                multicast_port=self.multicast_port,
+                announce_interval=5,
+                node_timeout=15
+            )
+
+            # Configurar callbacks para descubrimiento de nodos
+            self.discovery.set_callbacks(
+                on_discovered=self._on_node_discovered,
+                on_lost=self._on_node_lost
+            )
+
+            self.discovery.start()
+            logger.info(f"[Node-{self.node_id}] [BULLY] Discovery service started")
 
         # Iniciar thread de heartbeat
         self.heartbeat_thread = threading.Thread(
@@ -106,15 +154,50 @@ class BullyNode:
 
         logger.info(f"[Node-{self.node_id}] [BULLY] Node started successfully")
 
-        # Esperar un poco y luego iniciar primera elección
-        time.sleep(2)
-        if self.current_leader is None:
-            self.start_election()
+        # Iniciar primera elección en thread separado (no bloqueante)
+        def delayed_election():
+            # FASE DE DESCUBRIMIENTO: Esperar más tiempo para recibir heartbeats
+            logger.info(f"[Node-{self.node_id}] [DISCOVERY] Starting discovery phase (10s)...")
+            discovery_time = 10  # segundos para descubrir líder existente
+
+            # Esperar y verificar si se descubre un líder
+            start_time = time.time()
+            while time.time() - start_time < discovery_time:
+                if self.current_leader is not None:
+                    logger.info(f"[Node-{self.node_id}] [DISCOVERY] Leader discovered: Node {self.current_leader}")
+
+                    # Si mi ID es mayor que el líder actual, desafiar
+                    if self.node_id > self.current_leader:
+                        logger.info(f"[Node-{self.node_id}] [DISCOVERY] My ID ({self.node_id}) > current leader ({self.current_leader}), starting election")
+                        time.sleep(1)  # Breve pausa antes de desafiar
+                        self.start_election()
+                    else:
+                        logger.info(f"[Node-{self.node_id}] [DISCOVERY] Accepting current leader Node {self.current_leader}")
+                    return
+
+                time.sleep(0.5)  # Check cada 500ms
+
+            # No se descubrió líder, iniciar elección
+            logger.info(f"[Node-{self.node_id}] [DISCOVERY] No leader discovered, starting election")
+            if self.current_leader is None:
+                self.start_election()
+
+        threading.Thread(
+            target=delayed_election,
+            daemon=True,
+            name=f"InitialElection-{self.node_id}"
+        ).start()
     
     def stop(self):
         """Detiene el nodo"""
         logger.info(f"[Node-{self.node_id}] [BULLY] Stopping node...")
         self.running = False
+
+        # Detener discovery si está activo
+        if self.use_discovery and self.discovery:
+            self.discovery.stop()
+            logger.info(f"[Node-{self.node_id}] [BULLY] Discovery service stopped")
+
         self.comm.stop()
     
     # ========================================================================
@@ -130,8 +213,8 @@ class BullyNode:
         2. Si alguien responde OK → esperar COORDINATOR
         3. Si nadie responde → declararme líder
         """
+        # Prevenir elecciones concurrentes y setup inicial
         with self.lock:
-            # Prevenir elecciones concurrentes
             if self.election_in_progress:
                 logger.debug(f"[Node-{self.node_id}] [ELECTION] Election already in progress, skipping")
                 return
@@ -140,75 +223,77 @@ class BullyNode:
             self.current_term += 1
             current_term = self.current_term
 
-            logger.info(f"[Node-{self.node_id}] [ELECTION] Starting ELECTION process (term {current_term})")
+        logger.info(f"[Node-{self.node_id}] [ELECTION] Starting ELECTION process (term {current_term})")
 
-            # Encontrar nodos con ID mayor
-            higher_nodes = [
-                nid for nid in self.cluster_nodes.keys()
-                if nid > self.node_id
-            ]
+        # Encontrar nodos con ID mayor
+        higher_nodes = [
+            nid for nid in self.cluster_nodes.keys()
+            if nid > self.node_id
+        ]
 
-            if not higher_nodes:
-                # Soy el nodo con mayor ID → declararme líder
-                logger.info(f"[Node-{self.node_id}] [ELECTION] Has highest ID, becoming leader")
-                self._become_leader()
-                return
+        if not higher_nodes:
+            # Soy el nodo con mayor ID → declararme líder
+            logger.info(f"[Node-{self.node_id}] [ELECTION] Has highest ID, becoming leader")
+            self._become_leader()
+            return
 
-            # Enviar ELECTION a nodos con mayor ID
-            ok_count = 0
-            for target_id in higher_nodes:
-                ip, tcp_port, udp_port = self.cluster_nodes[target_id]
+        # Enviar ELECTION a nodos con mayor ID
+        ok_count = 0
+        for target_id in higher_nodes:
+            ip, tcp_port, udp_port = self.cluster_nodes[target_id]
 
-                msg = Message(
-                    type='ELECTION',
-                    sender_id=self.node_id,
-                    timestamp=time.time()
-                )
+            msg = Message(
+                type='ELECTION',
+                sender_id=self.node_id,
+                timestamp=time.time()
+            )
 
-                logger.debug(f"[Node-{self.node_id}] [ELECTION] Sending ELECTION to node {target_id}")
-                response = self.comm.send_tcp(ip, tcp_port, msg, timeout=5.0)  # Aumentado de 2.0s a 5.0s
+            logger.debug(f"[Node-{self.node_id}] [ELECTION] Sending ELECTION to node {target_id}")
+            response = self.comm.send_tcp(ip, tcp_port, msg, timeout=5.0)  # Aumentado de 2.0s a 5.0s
 
-                if response and response.type == 'OK':
-                    ok_count += 1
-                    logger.debug(f"[Node-{self.node_id}] [ELECTION] Received OK from node {target_id}")
+            if response and response.type == 'OK':
+                ok_count += 1
+                logger.debug(f"[Node-{self.node_id}] [ELECTION] Received OK from node {target_id}")
 
-            if ok_count > 0:
-                # Hay nodos con mayor prioridad, esperar COORDINATOR
-                logger.info(f"[Node-{self.node_id}] [ELECTION] Got {ok_count} OK responses, waiting for COORDINATOR...")
+        if ok_count > 0:
+            # Hay nodos con mayor prioridad, esperar COORDINATOR
+            logger.info(f"[Node-{self.node_id}] [ELECTION] Got {ok_count} OK responses, waiting for COORDINATOR...")
+            with self.lock:
                 self.state = NodeState.FOLLOWER
 
-                # Esperar COORDINATOR con timeout
-                wait_time = 10  # segundos
-                start_wait = time.time()
+            # Esperar COORDINATOR con timeout
+            wait_time = 10  # segundos
+            start_wait = time.time()
 
-                while time.time() - start_wait < wait_time:
-                    if self.current_leader is not None:
-                        logger.info(f"[Node-{self.node_id}] [ELECTION] COORDINATOR received from node {self.current_leader}")
-                        with self.lock:
-                            self.election_in_progress = False
-                        return
-                    time.sleep(0.5)
+            while time.time() - start_wait < wait_time:
+                if self.current_leader is not None:
+                    logger.info(f"[Node-{self.node_id}] [ELECTION] COORDINATOR received from node {self.current_leader}")
+                    with self.lock:
+                        self.election_in_progress = False
+                    return
+                time.sleep(0.5)
 
-                # Si no llegó COORDINATOR, reiniciar elección
-                logger.warning(f"[Node-{self.node_id}] [ELECTION] No COORDINATOR received, restarting election")
-                with self.lock:
-                    self.election_in_progress = False  # Liberar para reiniciar
-                threading.Thread(target=self.start_election, daemon=True).start()
-            else:
-                # Nadie respondió → soy el líder
-                logger.info(f"[Node-{self.node_id}] [ELECTION] No OK responses, becoming leader")
-                self._become_leader()
-                with self.lock:
-                    self.election_in_progress = False
+            # Si no llegó COORDINATOR, reiniciar elección
+            logger.warning(f"[Node-{self.node_id}] [ELECTION] No COORDINATOR received, restarting election")
+            with self.lock:
+                self.election_in_progress = False  # Liberar para reiniciar
+            threading.Thread(target=self.start_election, daemon=True).start()
+        else:
+            # Nadie respondió → soy el líder
+            logger.info(f"[Node-{self.node_id}] [ELECTION] No OK responses, becoming leader")
+            self._become_leader()
+            with self.lock:
+                self.election_in_progress = False
     
     def _become_leader(self):
         """Se convierte en líder y anuncia a todos"""
-        self.state = NodeState.LEADER
-        self.current_leader = self.node_id
+        with self.lock:
+            self.state = NodeState.LEADER
+            self.current_leader = self.node_id
 
         logger.warning(f"[Node-{self.node_id}] [LEADER] 🏆 NODE {self.node_id} IS NOW THE LEADER 🏆")
 
-        # Anunciar COORDINATOR a todos los nodos
+        # Anunciar COORDINATOR a todos los nodos con reintentos
         for target_id in self.cluster_nodes.keys():
             if target_id != self.node_id:
                 ip, tcp_port, udp_port = self.cluster_nodes[target_id]
@@ -219,13 +304,28 @@ class BullyNode:
                     timestamp=time.time()
                 )
 
-                # Enviar sin esperar respuesta
+                # Función para enviar con reintentos
+                def send_coordinator_with_retry(target_id, ip, tcp_port, msg):
+                    max_attempts = 3
+                    for attempt in range(max_attempts):
+                        response = self.comm.send_tcp(ip, tcp_port, msg, timeout=2.0)  # Timeout más largo
+                        if response is not None or not self.running:
+                            logger.debug(f"[Node-{self.node_id}] [LEADER] COORDINATOR sent successfully to node {target_id}")
+                            break
+                        if attempt < max_attempts - 1:
+                            logger.warning(f"[Node-{self.node_id}] [LEADER] COORDINATOR send failed to node {target_id}, retrying ({attempt+1}/{max_attempts})...")
+                            time.sleep(0.5)  # Esperar antes de reintentar
+                    else:
+                        logger.error(f"[Node-{self.node_id}] [LEADER] Failed to send COORDINATOR to node {target_id} after {max_attempts} attempts")
+
+                # Enviar en thread separado con reintentos
                 threading.Thread(
-                    target=lambda: self.comm.send_tcp(ip, tcp_port, msg, timeout=1.0),
+                    target=send_coordinator_with_retry,
+                    args=(target_id, ip, tcp_port, msg),
                     daemon=True
                 ).start()
 
-                logger.debug(f"[Node-{self.node_id}] [LEADER] Sent COORDINATOR to node {target_id}")
+                logger.debug(f"[Node-{self.node_id}] [LEADER] Sending COORDINATOR to node {target_id}")
 
         # CRITICAL FIX: Limpiar flag de elección después de convertirse en líder
         with self.lock:
@@ -337,7 +437,13 @@ class BullyNode:
                 else:
                     logger.info(f"[Node-{self.node_id}] [HEARTBEAT] ✓ Leader changed from node {old_leader} to node {leader_id}")
         else:
-            logger.info(f"[Node-{self.node_id}] [HEARTBEAT] ✓ Confirmed leader {leader_id}")
+            # Ensure we're FOLLOWER even when confirming same leader
+            if self.state == NodeState.LEADER:
+                with self.lock:
+                    self.state = NodeState.FOLLOWER
+                    logger.warning(f"[Node-{self.node_id}] [HEARTBEAT] 👑➡️💼 ABDICATION: I was LEADER but accepting higher-priority leader {leader_id}")
+            else:
+                logger.info(f"[Node-{self.node_id}] [HEARTBEAT] ✓ Confirmed leader {leader_id}")
     
     # ========================================================================
     # HEARTBEAT
@@ -425,6 +531,12 @@ class BullyNode:
         current_time = time.time()
         logger.info(f"[Node-{self.node_id}] [VALIDATION] Leader {leader_id} < My ID {self.node_id}: checking higher nodes...")
 
+        # EXCEPCIÓN PARA NODOS NUEVOS: Si no tenemos líder actual y estamos en FOLLOWER,
+        # somos un nodo nuevo descubriendo el cluster. Aceptar temporalmente cualquier líder.
+        if self.current_leader is None and self.state == NodeState.FOLLOWER:
+            logger.info(f"[Node-{self.node_id}] [VALIDATION] ✓ New node accepting initial leader {leader_id} during discovery")
+            return True
+
         # CRÍTICO: Si YO soy LEADER con mayor ID, NUNCA aceptar líder de menor ID
         # Esto previene el split-brain donde múltiples nodos piensan ser líderes
         if self.state == NodeState.LEADER:
@@ -456,6 +568,75 @@ class BullyNode:
             logger.debug(f"[Node-{self.node_id}] [TRACKING] Updated activity for node {node_id}")
 
     # ========================================================================
+    # GESTIÓN DINÁMICA DE NODOS
+    # ========================================================================
+
+    def _on_node_discovered(self, node_id: int, host: str, tcp_port: int, udp_port: int):
+        """
+        Callback cuando NodeDiscovery descubre un nuevo nodo.
+
+        Args:
+            node_id: ID del nodo descubierto
+            host: IP del nodo
+            tcp_port: Puerto TCP del nodo
+            udp_port: Puerto UDP del nodo
+        """
+        logger.info(f"[Node-{self.node_id}] [DYNAMIC] Callback: New node discovered - {node_id} at {host}:{tcp_port}")
+        self.add_node(node_id, host, tcp_port, udp_port)
+
+        # Si descubrimos un nodo con mayor ID y no hay líder, iniciar elección
+        if node_id > self.node_id and self.current_leader is None:
+            logger.info(f"[Node-{self.node_id}] [DYNAMIC] Discovered higher-ID node {node_id}, may need election")
+
+    def _on_node_lost(self, node_id: int):
+        """
+        Callback cuando NodeDiscovery pierde contacto con un nodo.
+
+        Args:
+            node_id: ID del nodo perdido
+        """
+        logger.warning(f"[Node-{self.node_id}] [DYNAMIC] Callback: Node lost - {node_id}")
+        self.remove_node(node_id)
+
+        # Si era el líder, iniciar elección
+        if self.current_leader == node_id:
+            logger.warning(f"[Node-{self.node_id}] [DYNAMIC] Lost leader node {node_id}, starting election")
+            if not self.election_in_progress:
+                threading.Thread(target=self.start_election, daemon=True).start()
+
+    def add_node(self, node_id: int, host: str, tcp_port: int, udp_port: int):
+        """
+        Agrega un nodo al cluster dinámicamente.
+
+        Args:
+            node_id: ID del nodo
+            host: IP del nodo
+            tcp_port: Puerto TCP del nodo
+            udp_port: Puerto UDP del nodo
+        """
+        with self.lock:
+            if node_id != self.node_id and node_id not in self.cluster_nodes:
+                self.cluster_nodes[node_id] = (host, tcp_port, udp_port)
+                self.node_last_seen[node_id] = time.time()
+                logger.info(f"[Node-{self.node_id}] [DYNAMIC] ✓ Added node {node_id} ({host}:{tcp_port}) to cluster")
+                logger.info(f"[Node-{self.node_id}] [DYNAMIC] Cluster now has {len(self.cluster_nodes)} nodes")
+
+    def remove_node(self, node_id: int):
+        """
+        Remueve un nodo del cluster dinámicamente.
+
+        Args:
+            node_id: ID del nodo a remover
+        """
+        with self.lock:
+            if node_id in self.cluster_nodes:
+                node_info = self.cluster_nodes.pop(node_id)
+                if node_id in self.node_last_seen:
+                    del self.node_last_seen[node_id]
+                logger.warning(f"[Node-{self.node_id}] [DYNAMIC] ✗ Removed node {node_id} ({node_info[0]}) from cluster")
+                logger.info(f"[Node-{self.node_id}] [DYNAMIC] Cluster now has {len(self.cluster_nodes)} nodes")
+
+    # ========================================================================
     # API PÚBLICA
     # ========================================================================
     
@@ -466,7 +647,11 @@ class BullyNode:
     def get_current_leader(self) -> Optional[int]:
         """Retorna ID del líder actual"""
         return self.current_leader
-    
+
+    def get_state(self) -> str:
+        """Retorna el estado actual del nodo como string"""
+        return self.state.value
+
     def get_status(self) -> dict:
         """Retorna estado completo del nodo"""
         return {

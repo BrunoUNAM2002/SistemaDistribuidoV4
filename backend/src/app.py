@@ -183,11 +183,13 @@ from routes.visitas import visitas_bp
 from routes.consultas import consultas_bp
 from routes.api import api_bp
 from routes.bully import bully_bp
+from routes.cluster_api import cluster_api_bp
 
 app.register_blueprint(visitas_bp, url_prefix='/visitas')
 app.register_blueprint(consultas_bp, url_prefix='/consultas')
 app.register_blueprint(api_bp, url_prefix='/api')
 app.register_blueprint(bully_bp, url_prefix='/api/bully')
+app.register_blueprint(cluster_api_bp)  # Ya tiene prefix /api/cluster definido
 
 
 # ============================================================================

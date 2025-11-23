@@ -137,6 +137,7 @@ class CommunicationManager:
     def _udp_server_loop(self):
         """Loop del servidor UDP"""
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.udp_socket.bind(('0.0.0.0', self.udp_port))
         self.udp_socket.settimeout(1.0)
 

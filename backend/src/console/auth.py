@@ -29,25 +29,30 @@ def login(app):
     ))
 
     max_attempts = 3
-    for attempt in range(max_attempts):
-        username = console.input("\n[bold]Usuario:[/bold] ")
-        password = getpass("Contraseña: ")
+    try:
+        for attempt in range(max_attempts):
+            username = console.input("\n[bold]Usuario:[/bold] ").strip().replace('\r', '')
+            password = getpass("Contraseña: ").strip().replace('\r', '')
 
-        # Use Flask app context for database query
-        with app.app_context():
-            user = Usuario.query.filter_by(
-                username=username,
-                activo=True
-            ).first()
+            # Use Flask app context for database query
+            with app.app_context():
+                user = Usuario.query.filter_by(
+                    username=username,
+                    activo=True
+                ).first()
 
-            if user and user.check_password(password):
-                console.print(f"\n[green]✓[/green] Sesión iniciada como [bold]{user.rol}[/bold]")
-                return user
-            else:
-                remaining = max_attempts - attempt - 1
-                if remaining > 0:
-                    console.print(f"[red]✗[/red] Credenciales inválidas. {remaining} intentos restantes.")
+                if user and user.check_password(password):
+                    console.print(f"\n[green]✓[/green] Sesión iniciada como [bold]{user.rol}[/bold]")
+                    return user
                 else:
-                    console.print("[red]✗[/red] Acceso denegado.")
+                    remaining = max_attempts - attempt - 1
+                    if remaining > 0:
+                        console.print(f"[red]✗[/red] Credenciales inválidas. {remaining} intentos restantes.")
+                    else:
+                        console.print("[red]✗[/red] Acceso denegado.")
+
+    except KeyboardInterrupt:
+        # Don't print message here - let main.py handle it
+        return None
 
     return None

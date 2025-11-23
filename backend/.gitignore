@@ -6,6 +6,9 @@ logs/
 *.db
 instance/
 
+# Node ID persistence files (auto-generated)
+data/node_ids/
+
 # Python cache
 __pycache__/
 *.pyc
@@ -27,3 +30,10 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+# Documentation and scripts (not for repo)
+*.md
+*.sh
+
+# Test results and temporary docs
+docs/

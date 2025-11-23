@@ -194,7 +194,7 @@ def show_bully_status(app, bully_manager):
     # Current node info
     is_leader = bully_manager.is_leader()
     leader_id = bully_manager.get_current_leader()
-    current_state = bully_manager.get_state()
+    current_state = bully_manager.state.value
 
     # Header info
     header_text = f"""
@@ -204,132 +204,145 @@ def show_bully_status(app, bully_manager):
     """
     console.print(Panel(header_text, border_style="cyan"))
 
-    # Cluster nodes table
+    # Cluster nodes info
     try:
-        cluster_status = bully_manager.get_cluster_status()
+        console.print("\n")
 
-        table = Table(title="Estado de Nodos del Cluster", show_header=True, header_style="bold magenta")
-        table.add_column("Nodo", justify="center", style="cyan", width=8)
-        table.add_column("Estado", style="magenta", width=12)
-        table.add_column("Último Heartbeat", style="yellow", width=20)
-        table.add_column("Activo", justify="center", width=8)
+        # Get basic cluster info
+        nodes_info = []
+        for nodo_id in [1, 2, 3, 4]:
+            is_current = (nodo_id == app.config['NODE_ID'])
+            is_node_leader = (nodo_id == leader_id)
 
-        for node_id, info in sorted(cluster_status.items()):
-            if info.get('last_seen') is not None:
-                last_seen = f"{info['last_seen']:.1f}s"
+            if is_current:
+                role = current_state
+            elif is_node_leader:
+                role = "LEADER"
             else:
-                last_seen = "N/A"
+                role = "FOLLOWER"
 
-            active = "🟢" if info.get('active', False) else "🔴"
-            role = info.get('role', 'UNKNOWN')
+            nodes_info.append({
+                'id': nodo_id,
+                'role': role,
+                'is_current': is_current
+            })
 
-            # Highlight current node
-            if node_id == app.config['NODE_ID']:
-                node_display = f"[bold]{node_id} (YO)[/bold]"
-            else:
-                node_display = str(node_id)
+        # Display nodes table
+        table = Table(title="Nodos del Cluster", show_header=True, header_style="bold magenta")
+        table.add_column("Nodo", justify="center", style="cyan", width=12)
+        table.add_column("Estado", style="magenta", width=15)
+        table.add_column("Icono", justify="center", width=8)
+
+        for node in nodes_info:
+            node_display = f"Nodo {node['id']}"
+            if node['is_current']:
+                node_display = f"[bold]{node_display} (YO)[/bold]"
+
+            icon = "👑" if node['role'] == "LEADER" else "🔵"
 
             table.add_row(
                 node_display,
-                role,
-                last_seen,
-                active
+                node['role'],
+                icon
             )
 
-        console.print("\n")
         console.print(table)
 
     except Exception as e:
-        console.print(f"\n[red]Error obteniendo estado del cluster: {e}[/red]")
+        console.print(f"\n[red]Error mostrando cluster: {e}[/red]")
 
     pause()
 
-def show_available_resources(app):
+def show_available_resources(app, bully_manager):
     """
-    Show available doctors and beds.
+    Show available doctors and beds from ALL cluster nodes (DISTRIBUTED).
 
     Args:
         app: Flask application
+        bully_manager: BullyNode instance for cluster queries
     """
     clear_screen()
-    console.print(create_header("Recursos Disponibles", f"Sala {app.config['NODE_ID']}"))
+    console.print(create_header("Recursos Disponibles - TODO EL CLUSTER"))
 
     with app.app_context():
-        # Doctors
-        doctores = Doctor.query.filter_by(
-            id_sala=app.config['NODE_ID'],
-            activo=True
-        ).all()
+        # DISTRIBUTED QUERY: Get all doctors from cluster
+        from models import get_all_cluster_doctors, get_all_cluster_beds
+        doctores = get_all_cluster_doctors(bully_manager, activo=True)
 
-        console.print("\n[bold cyan]Doctores:[/bold cyan]")
+        console.print("\n[bold cyan]Doctores (todas las salas):[/bold cyan]")
         if doctores:
             table_doc = Table(show_header=True, header_style="bold magenta")
             table_doc.add_column("ID", justify="center", width=6)
             table_doc.add_column("Nombre", style="green", width=25)
-            table_doc.add_column("Especialidad", style="cyan", width=20)
+            table_doc.add_column("Especialidad", style="cyan", width=18)
+            table_doc.add_column("Sala", justify="center", width=6)
             table_doc.add_column("Disponible", justify="center", width=12)
 
             for doc in doctores:
-                disp_color = "green" if doc.disponible else "red"
+                disp_color = "green" if doc['disponible'] else "red"
                 table_doc.add_row(
-                    str(doc.id_doctor),
-                    doc.nombre,
-                    doc.especialidad or "General",
-                    f"[{disp_color}]{bool_icon(doc.disponible)}[/]"
+                    str(doc['id_doctor']),
+                    doc['nombre'],
+                    doc['especialidad'] or "General",
+                    str(doc['id_sala']),
+                    f"[{disp_color}]{bool_icon(doc['disponible'])}[/]"
                 )
 
             console.print(table_doc)
         else:
-            console.print("[yellow]No hay doctores en esta sala[/yellow]")
+            console.print("[yellow]No hay doctores en el cluster[/yellow]")
 
-        # Beds
-        camas = Cama.query.filter_by(
-            id_sala=app.config['NODE_ID']
-        ).all()
+        # DISTRIBUTED QUERY: Get all beds from cluster
+        camas = get_all_cluster_beds(bully_manager)
 
-        console.print("\n[bold cyan]Camas:[/bold cyan]")
+        console.print("\n[bold cyan]Camas (todas las salas):[/bold cyan]")
         if camas:
             table_camas = Table(show_header=True, header_style="bold magenta")
             table_camas.add_column("Número", justify="center", width=10)
+            table_camas.add_column("Sala", justify="center", width=6)
             table_camas.add_column("Estado", justify="center", width=15)
             table_camas.add_column("Paciente Actual", style="yellow", width=30)
 
             for cama in camas:
-                estado = "Ocupada" if cama.ocupada else "Libre"
-                estado_color = "red" if cama.ocupada else "green"
-                paciente_nombre = cama.paciente_actual.nombre if cama.paciente_actual else "-"
+                estado = "Ocupada" if cama['ocupada'] else "Libre"
+                estado_color = "red" if cama['ocupada'] else "green"
+                paciente_nombre = cama['paciente_nombre'] if cama['paciente_nombre'] else "-"
 
                 table_camas.add_row(
-                    str(cama.numero),
+                    str(cama['numero']),
+                    str(cama['id_sala']),
                     f"[{estado_color}]{estado}[/]",
                     paciente_nombre
                 )
 
             console.print(table_camas)
         else:
-            console.print("[yellow]No hay camas registradas[/yellow]")
+            console.print("[yellow]No hay camas registradas en el cluster[/yellow]")
 
         pause()
 
-def show_doctors(app):
+def show_doctors(app, bully_manager):
     """
-    Show all doctors in the system (Admin only).
+    Show all doctors in the system from ALL nodes (DISTRIBUTED).
 
     Args:
         app: Flask application
+        bully_manager: BullyNode instance for cluster queries
     """
     clear_screen()
-    console.print(create_header("Lista de Doctores"))
+    console.print(create_header("Lista de Doctores - TODAS LAS SALAS"))
 
     with app.app_context():
-        doctores = Doctor.query.filter_by(activo=True).all()
+        # DISTRIBUTED QUERY: Get doctors from all cluster nodes
+        from models import get_all_cluster_doctors
+        doctores = get_all_cluster_doctors(bully_manager, activo=True)
 
         if not doctores:
-            console.print("\n[yellow]No hay doctores registrados[/yellow]")
+            console.print("\n[yellow]No hay doctores registrados en el cluster[/yellow]")
             pause()
             return
 
-        table = Table(show_header=True, header_style="bold magenta", title=f"Total: {len(doctores)} doctores")
+        table = Table(show_header=True, header_style="bold magenta", title=f"Total: {len(doctores)} doctores (cluster)")
         table.add_column("ID", justify="center", width=6)
         table.add_column("Nombre", style="green", width=25)
         table.add_column("Especialidad", style="cyan", width=20)
@@ -337,13 +350,13 @@ def show_doctors(app):
         table.add_column("Disponible", justify="center", width=12)
 
         for doc in doctores:
-            disp_color = "green" if doc.disponible else "red"
+            disp_color = "green" if doc['disponible'] else "red"
             table.add_row(
-                str(doc.id_doctor),
-                doc.nombre,
-                doc.especialidad or "General",
-                str(doc.id_sala),
-                f"[{disp_color}]{bool_icon(doc.disponible)}[/]"
+                str(doc['id_doctor']),
+                doc['nombre'],
+                doc['especialidad'] or "General",
+                str(doc['id_sala']),
+                f"[{disp_color}]{bool_icon(doc['disponible'])}[/]"
             )
 
         console.print(table)
@@ -423,6 +436,87 @@ def show_beds(app):
                 f"[{estado_color}]{estado}[/]",
                 paciente_nombre,
                 id_pac
+            )
+
+        console.print(table)
+        pause()
+
+def show_social_workers(app):
+    """
+    Show all social workers in the system.
+    Migrated from 'Primer entregable.py' ver_trabajadores_sociales().
+
+    Args:
+        app: Flask application
+    """
+    clear_screen()
+    console.print(create_header("Lista de Trabajadores Sociales"))
+
+    with app.app_context():
+        trabajadores = TrabajadorSocial.query.filter_by(activo=True).all()
+
+        if not trabajadores:
+            console.print("\n[yellow]No hay trabajadores sociales registrados[/yellow]")
+            pause()
+            return
+
+        table = Table(show_header=True, header_style="bold magenta", title=f"Total: {len(trabajadores)} trabajadores")
+        table.add_column("ID", justify="center", width=6)
+        table.add_column("Nombre", style="green", width=30)
+        table.add_column("Sala", justify="center", width=8)
+        table.add_column("Estado", justify="center", width=12)
+
+        for ts in trabajadores:
+            estado = "Activo" if ts.activo else "Inactivo"
+            estado_color = "green" if ts.activo else "red"
+            table.add_row(
+                str(ts.id_trabajador),
+                ts.nombre,
+                str(ts.id_sala),
+                f"[{estado_color}]{estado}[/]"
+            )
+
+        console.print(table)
+        pause()
+
+
+def show_patient_visits(app, user):
+    """
+    Show visits for current patient (all states).
+
+    Args:
+        app: Flask application
+        user: Current logged-in user (paciente)
+    """
+    clear_screen()
+    console.print(create_header("Mis Visitas de Emergencia"))
+
+    with app.app_context():
+        visitas = VisitaEmergencia.query.filter_by(
+            id_paciente=user.id_relacionado
+        ).order_by(VisitaEmergencia.timestamp.desc()).limit(50).all()
+
+        if not visitas:
+            console.print("\n[yellow]No tiene visitas registradas[/yellow]")
+            pause()
+            return
+
+        # Create table
+        table = Table(show_header=True, header_style="bold magenta", title=f"Total: {len(visitas)} visitas")
+        table.add_column("Folio", style="cyan", width=20)
+        table.add_column("Doctor", style="blue", width=25)
+        table.add_column("Síntomas", style="white", width=35)
+        table.add_column("Estado", width=12)
+        table.add_column("Fecha", style="yellow", width=16)
+
+        for v in visitas:
+            color = status_color(v.estado)
+            table.add_row(
+                v.folio,
+                truncate_text(v.doctor.nombre, 23),
+                truncate_text(v.sintomas, 33),
+                f"[{color}]{v.estado}[/]",
+                format_datetime(v.timestamp)
             )
 
         console.print(table)

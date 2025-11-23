@@ -140,6 +140,42 @@ class Consecutivo(db.Model):
         return f'<Consecutivo Sala {self.id_sala} - {self.fecha}: {self.consecutivo}>'
 
 
+def get_next_consecutivo(id_sala):
+    """
+    Obtiene el siguiente consecutivo para una sala.
+
+    Args:
+        id_sala: ID de la sala
+
+    Returns:
+        int: Próximo número consecutivo
+    """
+    from sqlalchemy import func
+    hoy = datetime.utcnow().date()
+
+    # Buscar consecutivo para hoy
+    consecutivo = Consecutivo.query.filter_by(
+        id_sala=id_sala,
+        fecha=hoy
+    ).first()
+
+    if not consecutivo:
+        # Crear nuevo consecutivo para hoy
+        consecutivo = Consecutivo(
+            id_sala=id_sala,
+            fecha=hoy,
+            consecutivo=1
+        )
+        db.session.add(consecutivo)
+        db.session.flush()
+        return 1
+    else:
+        # Incrementar consecutivo
+        consecutivo.consecutivo += 1
+        db.session.flush()
+        return consecutivo.consecutivo
+
+
 class Usuario(UserMixin, db.Model):
     """Modelo para autenticación con Flask-Login"""
     __tablename__ = 'USUARIOS'
@@ -147,8 +183,8 @@ class Usuario(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     password_hash = db.Column(db.String(200), nullable=False)
-    rol = db.Column(db.String(30), nullable=False)  # 'doctor', 'trabajador_social', 'admin'
-    id_relacionado = db.Column(db.Integer)  # id_doctor o id_trabajador según rol
+    rol = db.Column(db.String(30), nullable=False)  # 'doctor', 'trabajador_social', 'paciente'
+    id_relacionado = db.Column(db.Integer)  # id_doctor, id_trabajador o id_paciente según rol
     activo = db.Column(db.Boolean, default=True)
 
     def set_password(self, password):
@@ -233,3 +269,376 @@ def get_metricas_dashboard(id_sala=None):
         ).count()
 
     return metricas
+
+
+# Evento para generar folio automáticamente
+from sqlalchemy import event
+
+@event.listens_for(VisitaEmergencia, 'before_insert')
+def generate_folio(mapper, connection, target):
+    """
+    Genera el folio automáticamente antes de insertar la visita.
+    Formato: IDPACIENTE+IDDOCTOR+SALA+CONSECUTIVO
+    Ejemplo: 5+12+3+001
+    """
+    if not target.folio:
+        # Obtener consecutivo para la sala
+        consecutivo = get_next_consecutivo(target.id_sala)
+
+        # Generar folio: IDPACIENTE+IDDOCTOR+SALA+CONSECUTIVO
+        target.folio = f"{target.id_paciente}+{target.id_doctor}+{target.id_sala}+{consecutivo:03d}"
+
+
+# ============================================================================
+# CONSULTAS DISTRIBUIDAS - Agregación de datos del cluster completo
+# ============================================================================
+
+import requests
+import logging
+
+cluster_logger = logging.getLogger(__name__)
+
+
+def get_cluster_nodes_info(bully_manager):
+    """
+    Obtiene información de todos los nodos del cluster desde bully_manager.
+
+    Args:
+        bully_manager: Instancia de BullyNode
+
+    Returns:
+        list: Lista de tuplas (node_id, host, tcp_port)
+    """
+    nodes_info = []
+
+    if not bully_manager:
+        return nodes_info
+
+    # Obtener nodos del cluster desde bully_manager
+    for node_id, (host, tcp_port, udp_port) in bully_manager.cluster_nodes.items():
+        nodes_info.append((node_id, host, tcp_port))
+
+    return nodes_info
+
+
+def get_all_cluster_doctors(bully_manager, disponible=None, activo=True):
+    """
+    Consulta doctores de TODAS las salas del cluster.
+
+    Args:
+        bully_manager: Instancia de BullyNode
+        disponible: (opcional) True/False/None para filtrar disponibilidad
+        activo: (opcional) True/False para filtrar estado activo
+
+    Returns:
+        list: Lista de dict con información de doctores de todas las salas
+    """
+    all_doctors = []
+
+    # Agregar doctores locales
+    query = Doctor.query.filter_by(activo=activo)
+    if disponible is not None:
+        query = query.filter_by(disponible=disponible)
+
+    local_doctors = query.all()
+    for doc in local_doctors:
+        all_doctors.append({
+            'id_doctor': doc.id_doctor,
+            'nombre': doc.nombre,
+            'especialidad': doc.especialidad,
+            'disponible': doc.disponible,
+            'activo': doc.activo,
+            'id_sala': doc.id_sala,
+            'source': 'local'
+        })
+
+    # Consultar doctores de otros nodos
+    nodes_info = get_cluster_nodes_info(bully_manager)
+
+    for node_id, host, tcp_port in nodes_info:
+        # Saltear nodo local
+        from config import Config
+        if node_id == Config.NODE_ID:
+            continue
+
+        try:
+            # Construir URL
+            url = f"http://{host}:{tcp_port}/api/cluster/doctors"
+            params = {}
+            if disponible is not None:
+                params['disponible'] = 'true' if disponible else 'false'
+            if activo is not None:
+                params['activo'] = 'true' if activo else 'false'
+
+            response = requests.get(url, params=params, timeout=2)
+
+            if response.ok:
+                data = response.json()
+                for doc in data.get('doctors', []):
+                    doc['source'] = f'node_{node_id}'
+                    all_doctors.append(doc)
+            else:
+                cluster_logger.warning(f"Node {node_id} returned status {response.status_code}")
+
+        except requests.exceptions.Timeout:
+            cluster_logger.warning(f"Timeout connecting to node {node_id}")
+        except requests.exceptions.ConnectionError:
+            cluster_logger.warning(f"Connection error to node {node_id} (may be down)")
+        except Exception as e:
+            cluster_logger.error(f"Error querying node {node_id}: {e}")
+
+    return all_doctors
+
+
+def get_all_cluster_beds(bully_manager, ocupada=None):
+    """
+    Consulta camas de TODAS las salas del cluster.
+
+    Args:
+        bully_manager: Instancia de BullyNode
+        ocupada: (opcional) True/False/None para filtrar ocupación
+
+    Returns:
+        list: Lista de dict con información de camas de todas las salas
+    """
+    all_beds = []
+
+    # Agregar camas locales
+    query = Cama.query
+    if ocupada is not None:
+        query = query.filter_by(ocupada=ocupada)
+
+    local_beds = query.all()
+    for cama in local_beds:
+        all_beds.append({
+            'id_cama': cama.id_cama,
+            'numero': cama.numero,
+            'ocupada': cama.ocupada,
+            'id_sala': cama.id_sala,
+            'id_paciente': cama.id_paciente,
+            'paciente_nombre': cama.paciente_actual.nombre if cama.paciente_actual else None,
+            'source': 'local'
+        })
+
+    # Consultar camas de otros nodos
+    nodes_info = get_cluster_nodes_info(bully_manager)
+
+    for node_id, host, tcp_port in nodes_info:
+        from config import Config
+        if node_id == Config.NODE_ID:
+            continue
+
+        try:
+            url = f"http://{host}:{tcp_port}/api/cluster/beds"
+            params = {}
+            if ocupada is not None:
+                params['ocupada'] = 'true' if ocupada else 'false'
+
+            response = requests.get(url, params=params, timeout=2)
+
+            if response.ok:
+                data = response.json()
+                for bed in data.get('beds', []):
+                    bed['source'] = f'node_{node_id}'
+                    all_beds.append(bed)
+
+        except Exception as e:
+            cluster_logger.warning(f"Error querying beds from node {node_id}: {e}")
+
+    return all_beds
+
+
+def get_all_cluster_stats(bully_manager):
+    """
+    Obtiene estadísticas agregadas de TODO el cluster.
+
+    Args:
+        bully_manager: Instancia de BullyNode
+
+    Returns:
+        dict: Estadísticas agregadas del cluster completo
+    """
+    cluster_stats = {
+        'nodes': [],
+        'total_doctors_available': 0,
+        'total_doctors': 0,
+        'total_beds_available': 0,
+        'total_beds': 0,
+        'total_visits_active': 0,
+        'total_visits_completed': 0
+    }
+
+    # Estadísticas locales
+    from config import Config
+    local_stats = {
+        'node_id': Config.NODE_ID,
+        'status': 'local',
+        'doctors_available': Doctor.query.filter_by(id_sala=Config.NODE_ID, disponible=True, activo=True).count(),
+        'doctors_total': Doctor.query.filter_by(id_sala=Config.NODE_ID, activo=True).count(),
+        'beds_available': Cama.query.filter_by(id_sala=Config.NODE_ID, ocupada=False).count(),
+        'beds_total': Cama.query.filter_by(id_sala=Config.NODE_ID).count(),
+        'visits_active': VisitaEmergencia.query.filter_by(id_sala=Config.NODE_ID, estado='activa').count(),
+        'visits_completed': VisitaEmergencia.query.filter_by(id_sala=Config.NODE_ID, estado='completada').count()
+    }
+    cluster_stats['nodes'].append(local_stats)
+
+    # Agregar a totales
+    cluster_stats['total_doctors_available'] += local_stats['doctors_available']
+    cluster_stats['total_doctors'] += local_stats['doctors_total']
+    cluster_stats['total_beds_available'] += local_stats['beds_available']
+    cluster_stats['total_beds'] += local_stats['beds_total']
+    cluster_stats['total_visits_active'] += local_stats['visits_active']
+    cluster_stats['total_visits_completed'] += local_stats['visits_completed']
+
+    # Consultar otros nodos
+    nodes_info = get_cluster_nodes_info(bully_manager)
+
+    for node_id, host, tcp_port in nodes_info:
+        if node_id == Config.NODE_ID:
+            continue
+
+        try:
+            url = f"http://{host}:{tcp_port}/api/cluster/stats"
+            response = requests.get(url, timeout=2)
+
+            if response.ok:
+                data = response.json()
+                node_stats = {
+                    'node_id': node_id,
+                    'status': 'online',
+                    'doctors_available': data['doctors']['available'],
+                    'doctors_total': data['doctors']['total'],
+                    'beds_available': data['beds']['available'],
+                    'beds_total': data['beds']['total'],
+                    'visits_active': data['visits']['active'],
+                    'visits_completed': data['visits']['completed']
+                }
+                cluster_stats['nodes'].append(node_stats)
+
+                # Agregar a totales
+                cluster_stats['total_doctors_available'] += node_stats['doctors_available']
+                cluster_stats['total_doctors'] += node_stats['doctors_total']
+                cluster_stats['total_beds_available'] += node_stats['beds_available']
+                cluster_stats['total_beds'] += node_stats['beds_total']
+                cluster_stats['total_visits_active'] += node_stats['visits_active']
+                cluster_stats['total_visits_completed'] += node_stats['visits_completed']
+            else:
+                cluster_stats['nodes'].append({'node_id': node_id, 'status': 'error'})
+
+        except Exception as e:
+            cluster_logger.warning(f"Error querying stats from node {node_id}: {e}")
+            cluster_stats['nodes'].append({'node_id': node_id, 'status': 'offline'})
+
+    return cluster_stats
+
+
+# ============================================================================
+# FUNCIONES DE REPLICACIÓN DISTRIBUIDA - Creación de visitas
+# ============================================================================
+
+def get_node_flask_url(node_id, host='localhost'):
+    """
+    Calcula la URL del servidor Flask de un nodo basado en su NODE_ID.
+
+    Args:
+        node_id: ID del nodo
+        host: Hostname del nodo (default: localhost)
+
+    Returns:
+        str: URL completa del Flask server (ej: http://localhost:5001)
+    """
+    from config import Config
+    flask_port = 5000 + node_id % 1000
+    return f"http://{host}:{flask_port}"
+
+
+def get_leader_flask_url(bully_manager):
+    """
+    Obtiene la URL del servidor Flask del nodo líder actual.
+
+    Args:
+        bully_manager: Instancia de BullyNode
+
+    Returns:
+        tuple: (leader_id, leader_url) o (None, None) si no hay líder
+    """
+    if not bully_manager:
+        cluster_logger.error("bully_manager is None")
+        return None, None
+
+    leader_id = bully_manager.get_current_leader()
+    if not leader_id:
+        cluster_logger.error("No leader elected yet")
+        return None, None
+
+    # Obtener host del líder desde cluster_nodes
+    if leader_id in bully_manager.cluster_nodes:
+        host, _, _ = bully_manager.cluster_nodes[leader_id]
+    else:
+        host = 'localhost'
+
+    leader_url = get_node_flask_url(leader_id, host)
+    return leader_id, leader_url
+
+
+def replicate_visit_to_cluster(bully_manager, visita_data, exclude_node_id=None):
+    """
+    Replica una visita a todos los nodos del cluster (excepto el excluido).
+
+    Usado por el nodo LÍDER para propagar una visita recién creada.
+
+    Args:
+        bully_manager: Instancia de BullyNode
+        visita_data: Diccionario con datos de la visita a replicar
+        exclude_node_id: ID del nodo a excluir (opcional, para no replicar al líder mismo)
+
+    Returns:
+        dict: {
+            'success_count': int,
+            'failed_nodes': [node_ids],
+            'total_nodes': int
+        }
+    """
+    from config import Config
+
+    nodes_info = get_cluster_nodes_info(bully_manager)
+    success_count = 0
+    failed_nodes = []
+
+    for node_id, host, tcp_port in nodes_info:
+        # Saltar nodo actual y nodo excluido
+        if node_id == Config.NODE_ID or node_id == exclude_node_id:
+            continue
+
+        try:
+            url = get_node_flask_url(node_id, host)
+            endpoint = f"{url}/api/cluster/replicate-visit"
+
+            response = requests.post(endpoint, json=visita_data, timeout=3)
+
+            if response.ok:
+                success_count += 1
+                cluster_logger.info(f"Visit replicated successfully to node {node_id}")
+            else:
+                failed_nodes.append(node_id)
+                cluster_logger.warning(f"Node {node_id} rejected replication: {response.status_code}")
+
+        except requests.exceptions.Timeout:
+            failed_nodes.append(node_id)
+            cluster_logger.warning(f"Timeout replicating to node {node_id}")
+        except requests.exceptions.ConnectionError:
+            failed_nodes.append(node_id)
+            cluster_logger.warning(f"Connection error to node {node_id} (may be down)")
+        except Exception as e:
+            failed_nodes.append(node_id)
+            cluster_logger.error(f"Error replicating to node {node_id}: {e}")
+
+    total_nodes = len(nodes_info) - (1 if Config.NODE_ID in [n[0] for n in nodes_info] else 0)
+    if exclude_node_id:
+        total_nodes -= 1
+
+    return {
+        'success_count': success_count,
+        'failed_nodes': failed_nodes,
+        'total_nodes': total_nodes
+    }

@@ -45,24 +45,18 @@ def init_default_users():
     """
     Inicializa usuarios por defecto si no existen.
     Debe llamarse al iniciar la aplicación.
-    """
-    # Admin por defecto
-    admin = Usuario.query.filter_by(username='admin').first()
-    if not admin:
-        admin = Usuario(
-            username='admin',
-            rol='admin',
-            activo=True
-        )
-        admin.set_password('admin123')  # Cambiar en producción
-        db.session.add(admin)
 
+    NOTA: Se crean usuarios con roles 'doctor', 'trabajador_social' y 'paciente'
+    según especificaciones del proyecto.
+    """
     # Usuarios de prueba para cada rol
     usuarios_prueba = [
         {'username': 'doctor1', 'password': 'doc123', 'rol': 'doctor', 'id_relacionado': 1},
         {'username': 'doctor2', 'password': 'doc123', 'rol': 'doctor', 'id_relacionado': 2},
         {'username': 'trabajador1', 'password': 'trab123', 'rol': 'trabajador_social', 'id_relacionado': 1},
         {'username': 'trabajador2', 'password': 'trab123', 'rol': 'trabajador_social', 'id_relacionado': 2},
+        {'username': 'paciente1', 'password': 'pac123', 'rol': 'paciente', 'id_relacionado': 1},
+        {'username': 'paciente2', 'password': 'pac123', 'rol': 'paciente', 'id_relacionado': 2},
     ]
 
     for user_data in usuarios_prueba:
@@ -112,15 +106,24 @@ def get_user_info(user):
             info['nombre'] = trabajador.nombre
             info['sala_id'] = trabajador.id_sala
 
+    elif user.rol == 'paciente' and user.id_relacionado:
+        from models import Paciente
+        paciente = Paciente.query.get(user.id_relacionado)
+        if paciente:
+            info['nombre'] = paciente.nombre
+            info['edad'] = paciente.edad
+            info['sexo'] = paciente.sexo
+            info['telefono'] = paciente.telefono
+
     return info
 
 
 def get_rol_display(rol):
     """Retorna el nombre del rol para mostrar en la UI"""
     roles_display = {
-        'admin': 'Administrador',
         'doctor': 'Doctor',
-        'trabajador_social': 'Trabajador Social'
+        'trabajador_social': 'Trabajador Social',
+        'paciente': 'Paciente'
     }
     return roles_display.get(rol, rol)
 
@@ -128,14 +131,10 @@ def get_rol_display(rol):
 def can_access_sala(user, id_sala):
     """
     Verifica si un usuario puede acceder a recursos de una sala específica.
-    Los admins tienen acceso a todas las salas.
-    Doctores y trabajadores sociales solo a su sala asignada.
+    Doctores y trabajadores sociales solo pueden acceder a su sala asignada.
     """
     if not user or not user.is_authenticated:
         return False
-
-    if user.rol == 'admin':
-        return True
 
     user_info = get_user_info(user)
     if user_info and 'sala_id' in user_info:

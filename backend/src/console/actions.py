@@ -7,8 +7,10 @@ from rich.panel import Panel
 from rich.table import Table
 from datetime import datetime
 from models import (
-    db, Paciente, Doctor, Cama, TrabajadorSocial, VisitaEmergencia
+    db, Paciente, Doctor, Cama, TrabajadorSocial, VisitaEmergencia,
+    get_leader_flask_url, replicate_visit_to_cluster
 )
+import requests
 from console.ui import (
     create_header, show_success, show_error, show_warning, show_info,
     get_text_input, get_int_input, confirm_action, pause, clear_screen
@@ -19,7 +21,11 @@ console = Console()
 
 def create_visit(app, bully_manager, user):
     """
-    Create a new emergency visit (LEADER-ONLY operation).
+    Create a new emergency visit (DISTRIBUTED operation).
+
+    Flow:
+    - If node is LEADER: create locally + replicate to all nodes
+    - If node is FOLLOWER: send request to leader, leader coordinates
 
     Args:
         app: Flask application
@@ -32,22 +38,14 @@ def create_visit(app, bully_manager, user):
     clear_screen()
     console.print(create_header("Crear Nueva Visita de Emergencia"))
 
-    # CRITICAL: Leader-only validation
-    if not bully_manager.is_leader():
-        leader_id = bully_manager.get_current_leader()
-        console.print(Panel(
-            f"[bold red]⚠ OPERACIÓN DENEGADA[/bold red]\n\n"
-            f"Solo el nodo líder puede crear nuevas visitas.\n\n"
-            f"[yellow]Nodo actual:[/yellow] {app.config['NODE_ID']}\n"
-            f"[green]Líder actual:[/green] Nodo {leader_id}\n\n"
-            f"Por favor, conectarse al nodo líder para crear visitas.",
-            border_style="red",
-            title="🔒 Validación de Líder"
-        ))
-        pause()
-        return False
+    # Check if we're the leader
+    is_leader = bully_manager.is_leader()
 
-    console.print("[green]✓[/green] Validación de líder exitosa - Nodo líder confirmado\n")
+    if is_leader:
+        console.print("[green]✓[/green] Nodo líder - Procesando creación con exclusión mutua\n")
+    else:
+        leader_id = bully_manager.get_current_leader()
+        console.print(f"[cyan]ℹ[/cyan] Nodo follower - Enviando solicitud al líder (Nodo {leader_id})\n")
 
     try:
         with app.app_context():
@@ -238,45 +236,184 @@ def create_visit(app, bully_manager, user):
                 pause()
                 return False
 
-            # Step 7: Create VisitaEmergencia
-            visita = VisitaEmergencia(
-                id_paciente=paciente.id_paciente,
-                id_doctor=doctor.id_doctor,
-                id_cama=cama.id_cama,
-                id_trabajador=trabajador.id_trabajador,
-                id_sala=app.config['NODE_ID'],
-                sintomas=sintomas,
-                estado='activa',
-                timestamp=datetime.utcnow()
-            )
+            # ============================================================
+            # DISTRIBUTED LOGIC: Leader vs Follower
+            # ============================================================
 
-            db.session.add(visita)
+            if is_leader:
+                # LEADER PATH: Create locally + replicate
+                console.print("\n[cyan]→[/cyan] Creando visita en nodo líder...")
 
-            # Update cama status
-            cama.ocupada = True
-            cama.id_paciente = paciente.id_paciente
+                visita = VisitaEmergencia(
+                    id_paciente=paciente.id_paciente,
+                    id_doctor=doctor.id_doctor,
+                    id_cama=cama.id_cama,
+                    id_trabajador=trabajador.id_trabajador,
+                    id_sala=app.config['NODE_ID'],
+                    sintomas=sintomas,
+                    estado='activa',
+                    timestamp=datetime.utcnow()
+                )
 
-            # Update doctor status
-            doctor.disponible = False
+                db.session.add(visita)
 
-            # Commit transaction
-            db.session.commit()
+                # Update resources
+                cama.ocupada = True
+                cama.id_paciente = paciente.id_paciente
+                doctor.disponible = False
 
-            # Success message
-            console.print("\n")
-            console.print(Panel(
-                f"[bold green]✓ VISITA CREADA EXITOSAMENTE[/bold green]\n\n"
-                f"[bold]Folio:[/bold] [cyan]{visita.folio or 'Generándose...'}[/cyan]\n"
-                f"[bold]Paciente:[/bold] {paciente.nombre}\n"
-                f"[bold]Doctor:[/bold] {doctor.nombre}\n"
-                f"[bold]Cama:[/bold] #{cama.numero}\n"
-                f"[bold]Estado:[/bold] [green]Activa[/green]",
-                border_style="green",
-                title="🏥 Visita Registrada"
-            ))
+                db.session.commit()
+                db.session.refresh(visita)
 
-            pause()
-            return True
+                console.print(f"[green]✓[/green] Visita creada localmente: [cyan]{visita.folio}[/cyan]")
+
+                # Replicate to all nodes
+                console.print("[cyan]→[/cyan] Replicando a todos los nodos del cluster...")
+
+                visita_data = {
+                    'folio': visita.folio,
+                    'id_paciente': visita.id_paciente,
+                    'id_doctor': visita.id_doctor,
+                    'id_cama': visita.id_cama,
+                    'id_trabajador': visita.id_trabajador,
+                    'id_sala': visita.id_sala,
+                    'sintomas': visita.sintomas,
+                    'diagnostico': visita.diagnostico,
+                    'estado': visita.estado,
+                    'timestamp': visita.timestamp.isoformat() if visita.timestamp else None,
+                    'fecha_cierre': visita.fecha_cierre.isoformat() if visita.fecha_cierre else None
+                }
+
+                replication_result = replicate_visit_to_cluster(
+                    bully_manager,
+                    visita_data,
+                    exclude_node_id=app.config['NODE_ID']
+                )
+
+                console.print(f"[green]✓[/green] Replicación: {replication_result['success_count']}/{replication_result['total_nodes']} nodos")
+
+                # Show success
+                console.print("\n")
+                console.print(Panel(
+                    f"[bold green]✓ VISITA CREADA Y REPLICADA EXITOSAMENTE[/bold green]\n\n"
+                    f"[bold]Folio:[/bold] [cyan]{visita.folio}[/cyan]\n"
+                    f"[bold]Paciente:[/bold] {paciente.nombre}\n"
+                    f"[bold]Doctor:[/bold] {doctor.nombre}\n"
+                    f"[bold]Cama:[/bold] #{cama.numero}\n"
+                    f"[bold]Estado:[/bold] [green]Activa[/green]\n"
+                    f"[bold]Replicado en:[/bold] {replication_result['success_count']} nodos",
+                    border_style="green",
+                    title="🏥 Visita Registrada (Líder)"
+                ))
+
+                pause()
+                return True
+
+            else:
+                # FOLLOWER PATH: Send request to leader
+                console.print("\n[cyan]→[/cyan] Enviando solicitud al nodo líder...")
+
+                # Prepare request data
+                request_data = {
+                    'id_paciente': paciente.id_paciente,
+                    'id_doctor': doctor.id_doctor,
+                    'id_cama': cama.id_cama,
+                    'id_trabajador': trabajador.id_trabajador,
+                    'id_sala': app.config['NODE_ID'],
+                    'sintomas': sintomas
+                }
+
+                # Get leader URL with retries
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        leader_id, leader_url = get_leader_flask_url(bully_manager)
+
+                        if not leader_url:
+                            show_error("No hay líder disponible")
+                            db.session.rollback()
+                            pause()
+                            return False
+
+                        # Send HTTP POST request to leader
+                        endpoint = f"{leader_url}/api/cluster/create-visit"
+                        response = requests.post(endpoint, json=request_data, timeout=10)
+
+                        if response.ok:
+                            result = response.json()
+
+                            if result.get('success'):
+                                folio = result.get('folio')
+
+                                # Commit local paciente if it was created
+                                db.session.commit()
+
+                                # Show success
+                                console.print("\n")
+                                console.print(Panel(
+                                    f"[bold green]✓ VISITA CREADA EXITOSAMENTE (VÍA LÍDER)[/bold green]\n\n"
+                                    f"[bold]Folio:[/bold] [cyan]{folio}[/cyan]\n"
+                                    f"[bold]Paciente:[/bold] {paciente.nombre}\n"
+                                    f"[bold]Doctor:[/bold] {doctor.nombre}\n"
+                                    f"[bold]Cama:[/bold] #{cama.numero}\n"
+                                    f"[bold]Procesado por:[/bold] Nodo Líder {leader_id}\n"
+                                    f"[bold]Estado:[/bold] [green]Activa y Replicada[/green]",
+                                    border_style="green",
+                                    title="🏥 Visita Registrada"
+                                ))
+
+                                pause()
+                                return True
+                            else:
+                                error_msg = result.get('error', 'Unknown error')
+                                show_error(f"El líder rechazó la solicitud: {error_msg}")
+                                db.session.rollback()
+                                pause()
+                                return False
+
+                        else:
+                            # HTTP error
+                            if attempt < max_retries - 1:
+                                console.print(f"[yellow]⚠[/yellow] Error de conexión (intento {attempt + 1}/{max_retries}), reintentando...")
+                                continue
+                            else:
+                                show_error(f"Error HTTP del líder: {response.status_code}")
+                                db.session.rollback()
+                                pause()
+                                return False
+
+                    except requests.exceptions.Timeout:
+                        if attempt < max_retries - 1:
+                            console.print(f"[yellow]⚠[/yellow] Timeout (intento {attempt + 1}/{max_retries}), reintentando...")
+                            continue
+                        else:
+                            show_error("Timeout al conectar con el líder")
+                            db.session.rollback()
+                            pause()
+                            return False
+
+                    except requests.exceptions.ConnectionError:
+                        if attempt < max_retries - 1:
+                            console.print(f"[yellow]⚠[/yellow] Error de conexión (intento {attempt + 1}/{max_retries}), verificando líder...")
+                            # Leader might have changed, get new leader in next iteration
+                            continue
+                        else:
+                            show_error("No se pudo conectar con el nodo líder")
+                            db.session.rollback()
+                            pause()
+                            return False
+
+                    except Exception as e:
+                        show_error(f"Error enviando solicitud al líder: {e}")
+                        db.session.rollback()
+                        pause()
+                        return False
+
+                # If we get here, all retries failed
+                show_error("Falló después de múltiples intentos")
+                db.session.rollback()
+                pause()
+                return False
 
     except ValueError as ve:
         show_error(f"Error en los datos ingresados: {ve}")
@@ -427,9 +564,12 @@ def close_visit(app, user):
         return False
 
 
-def cancel_visit(app, bully_manager, user):
+def assign_doctor_to_patient(app, bully_manager, user):
     """
-    Cancel an active visit (Admin or Leader only).
+    Quick doctor assignment to patient (simplified from Primer entregable).
+
+    This is a simplified version of create_visit() focused on doctor assignment.
+    Migrated from 'Primer entregable.py' asignar_doctor() function.
 
     Args:
         app: Flask application
@@ -437,83 +577,138 @@ def cancel_visit(app, bully_manager, user):
         user: Current logged-in user
 
     Returns:
-        bool: True if visit cancelled successfully, False otherwise
+        bool: True if assignment successful, False otherwise
     """
     clear_screen()
-    console.print(create_header("Cancelar Visita de Emergencia"))
+    console.print(create_header("Asignar Doctor a Paciente"))
 
-    # Verify permissions
-    if user.rol != 'admin':
-        show_error("Solo los administradores pueden cancelar visitas")
-        pause()
-        return False
-
-    # Leader validation for write operations
+    # Leader validation
     if not bully_manager.is_leader():
         leader_id = bully_manager.get_current_leader()
         console.print(Panel(
             f"[bold red]⚠ OPERACIÓN DENEGADA[/bold red]\n\n"
-            f"Solo el nodo líder puede cancelar visitas.\n\n"
+            f"Solo el nodo líder puede asignar doctores.\n\n"
             f"[yellow]Nodo actual:[/yellow] {app.config['NODE_ID']}\n"
             f"[green]Líder actual:[/green] Nodo {leader_id}",
-            border_style="red"
+            border_style="red",
+            title="🔒 Validación de Líder"
         ))
         pause()
         return False
 
     try:
         with app.app_context():
-            # Get folio from user
-            folio = get_text_input("Ingrese el folio de la visita a cancelar").upper()
+            # Step 1: Select patient
+            console.print("[bold cyan]PASO 1: Seleccionar Paciente[/bold cyan]\n")
 
-            # Find visit
-            visita = VisitaEmergencia.query.filter_by(
-                folio=folio,
-                estado='activa'
-            ).first()
+            # Show available patients (with existing visits)
+            visitas = VisitaEmergencia.query.filter_by(estado='activa').all()
 
-            if not visita:
-                show_error(f"No se encontró visita activa con folio: {folio}")
+            if not visitas:
+                show_warning("No hay visitas activas para asignar doctor")
                 pause()
                 return False
 
-            # Show visit details
-            details = f"""
-[bold]Folio:[/bold] {visita.folio}
-[bold]Paciente:[/bold] {visita.paciente.nombre}
-[bold]Doctor:[/bold] {visita.doctor.nombre}
-[bold]Cama:[/bold] #{visita.cama.numero}
-[bold]Síntomas:[/bold] {visita.sintomas}
-            """
+            table = Table(show_header=True, header_style="bold magenta")
+            table.add_column("ID Visita", width=10)
+            table.add_column("Paciente", style="green", width=25)
+            table.add_column("Doctor Actual", style="cyan", width=25)
+            table.add_column("Folio", width=20)
 
-            console.print(Panel(details, border_style="yellow", title="Visita a Cancelar"))
+            for v in visitas:
+                table.add_row(
+                    str(v.id_visita),
+                    v.paciente.nombre,
+                    v.doctor.nombre if v.doctor else "SIN ASIGNAR",
+                    v.folio
+                )
 
-            # Get cancellation reason
-            motivo = get_text_input("\nMotivo de cancelación")
+            console.print(table)
+            console.print()
 
-            if not confirm_action("\n¿Confirmar cancelación?", default=False):
+            id_visita = get_int_input("ID de la visita")
+
+            visita = VisitaEmergencia.query.get(id_visita)
+            if not visita or visita.estado != 'activa':
+                show_error("Visita no encontrada o no está activa")
+                pause()
+                return False
+
+            # Step 2: Select doctor
+            console.print(f"\n[bold cyan]PASO 2: Seleccionar Doctor[/bold cyan]\n")
+
+            doctores = Doctor.query.filter_by(
+                id_sala=app.config['NODE_ID'],
+                activo=True
+            ).all()
+
+            if not doctores:
+                show_error("No hay doctores en esta sala")
+                pause()
+                return False
+
+            table_doc = Table(show_header=True, header_style="bold magenta")
+            table_doc.add_column("ID", width=6)
+            table_doc.add_column("Nombre", style="green", width=30)
+            table_doc.add_column("Especialidad", style="cyan", width=20)
+            table_doc.add_column("Disponible", justify="center", width=12)
+
+            for doc in doctores:
+                estado = "✅ Sí" if doc.disponible else "❌ No"
+                estado_color = "green" if doc.disponible else "red"
+                table_doc.add_row(
+                    str(doc.id_doctor),
+                    doc.nombre,
+                    doc.especialidad or "General",
+                    f"[{estado_color}]{estado}[/]"
+                )
+
+            console.print(table_doc)
+            console.print()
+
+            id_doctor = get_int_input("ID del doctor")
+
+            doctor = Doctor.query.get(id_doctor)
+            if not doctor or not doctor.activo:
+                show_error("Doctor no encontrado o inactivo")
+                pause()
+                return False
+
+            # Validation: Check doctor availability (like Primer entregable)
+            if not doctor.disponible:
+                show_warning(f"⚠️  {doctor.nombre} está OCUPADO")
+                if not confirm_action("¿Asignar de todas formas?", default=False):
+                    console.print("[yellow]Operación cancelada[/yellow]")
+                    pause()
+                    return False
+
+            # Step 3: Confirm and assign
+            console.print(f"\n[bold]Resumen:[/bold]")
+            console.print(f"  Paciente: [green]{visita.paciente.nombre}[/green]")
+            console.print(f"  Doctor: [cyan]{doctor.nombre}[/cyan] ({doctor.especialidad or 'General'})")
+            console.print()
+
+            if not confirm_action("¿Confirmar asignación?", default=True):
                 console.print("[yellow]Operación cancelada[/yellow]")
                 pause()
                 return False
 
-            # Update visit
-            visita.estado = 'cancelada'
-            visita.diagnostico = f"CANCELADA - {motivo}"
-            visita.fecha_cierre = datetime.utcnow()
+            # Perform assignment (free old doctor if exists, assign new one)
+            if visita.doctor and visita.doctor.id_doctor != doctor.id_doctor:
+                visita.doctor.disponible = True
 
-            # Free resources
-            visita.doctor.disponible = True
-            visita.cama.ocupada = False
-            visita.cama.id_paciente = None
+            visita.id_doctor = doctor.id_doctor
+            visita.estado = 'En Consulta'  # Like Primer entregable
+            doctor.disponible = False
 
             db.session.commit()
 
-            show_success(f"Visita {folio} cancelada correctamente")
+            show_success(f"Doctor {doctor.nombre} asignado a {visita.paciente.nombre}")
             pause()
             return True
 
     except Exception as e:
-        show_error(f"Error al cancelar visita: {e}")
+        show_error(f"Error en asignación: {e}")
         db.session.rollback()
         pause()
         return False

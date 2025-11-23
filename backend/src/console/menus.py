@@ -9,9 +9,10 @@ from rich.panel import Panel
 
 from console.views import (
     show_my_visits, show_all_visits, show_dashboard, show_bully_status,
-    show_available_resources, show_doctors, show_patients, show_beds
+    show_available_resources, show_doctors, show_patients, show_beds,
+    show_patient_visits
 )
-from console.actions import create_visit, close_visit, cancel_visit
+from console.actions import create_visit, close_visit, assign_doctor_to_patient
 from console.ui import clear_screen, show_error
 
 console = Console()
@@ -42,7 +43,7 @@ def show_menu_header(app, bully_manager, user):
 
     is_leader = bully_manager.is_leader()
     leader_id = bully_manager.get_current_leader()
-    state = bully_manager.get_state()
+    state = bully_manager.state.value
 
     header_text = f"""
 [bold cyan]Sistema de Emergencias Médicas - Distribuido[/bold cyan]
@@ -72,8 +73,8 @@ def main_menu(app, bully_manager, user):
         return doctor_menu(app, bully_manager, user)
     elif user.rol == 'trabajador_social':
         return trabajador_social_menu(app, bully_manager, user)
-    elif user.rol == 'admin':
-        return admin_menu(app, bully_manager, user)
+    elif user.rol == 'paciente':
+        return paciente_menu(app, bully_manager, user)
     else:
         show_error(f"Rol desconocido: {user.rol}")
         return False
@@ -129,7 +130,7 @@ def doctor_menu(app, bully_manager, user):
             show_bully_status(app, bully_manager)
 
         elif choice == "💼 Ver recursos disponibles (doctores y camas)":
-            show_available_resources(app)
+            show_available_resources(app, bully_manager)
 
 
 def trabajador_social_menu(app, bully_manager, user):
@@ -149,6 +150,7 @@ def trabajador_social_menu(app, bully_manager, user):
 
         choices = [
             "➕ Crear nueva visita de emergencia",
+            "🩺 Asignar Doctor a Paciente",
             "🏥 Ver todas las visitas",
             "📊 Ver dashboard de métricas",
             "🌐 Ver estado del cluster Bully",
@@ -168,6 +170,9 @@ def trabajador_social_menu(app, bully_manager, user):
         if choice == "➕ Crear nueva visita de emergencia":
             create_visit(app, bully_manager, user)
 
+        elif choice == "🩺 Asignar Doctor a Paciente":
+            assign_doctor_to_patient(app, bully_manager, user)
+
         elif choice == "🏥 Ver todas las visitas":
             visitas_submenu(app)
 
@@ -178,60 +183,7 @@ def trabajador_social_menu(app, bully_manager, user):
             show_bully_status(app, bully_manager)
 
         elif choice == "💼 Ver recursos disponibles (doctores y camas)":
-            show_available_resources(app)
-
-
-def admin_menu(app, bully_manager, user):
-    """
-    Menu for administrators (full access).
-
-    Args:
-        app: Flask application
-        bully_manager: BullyNode instance
-        user: Current user (admin)
-
-    Returns:
-        bool: True to continue, False to logout
-    """
-    while True:
-        show_menu_header(app, bully_manager, user)
-
-        choices = [
-            "➕ Crear nueva visita de emergencia",
-            "🏥 Gestión de visitas",
-            "📑 Consultas y reportes",
-            "📊 Ver dashboard de métricas",
-            "🌐 Ver estado del cluster Bully",
-            "💼 Ver recursos disponibles",
-            "🚪 Cerrar sesión"
-        ]
-
-        choice = questionary.select(
-            "Seleccione una opción:",
-            choices=choices,
-            style=custom_style
-        ).ask()
-
-        if choice is None or choice == "🚪 Cerrar sesión":
-            return False
-
-        if choice == "➕ Crear nueva visita de emergencia":
-            create_visit(app, bully_manager, user)
-
-        elif choice == "🏥 Gestión de visitas":
-            visitas_submenu(app, is_admin=True, bully_manager=bully_manager, user=user)
-
-        elif choice == "📑 Consultas y reportes":
-            consultas_menu(app)
-
-        elif choice == "📊 Ver dashboard de métricas":
-            show_dashboard(app)
-
-        elif choice == "🌐 Ver estado del cluster Bully":
-            show_bully_status(app, bully_manager)
-
-        elif choice == "💼 Ver recursos disponibles":
-            show_available_resources(app)
+            show_available_resources(app, bully_manager)
 
 
 def visitas_submenu(app, is_admin=False, bully_manager=None, user=None):
@@ -255,13 +207,9 @@ def visitas_submenu(app, is_admin=False, bully_manager=None, user=None):
         choices = [
             "📋 Ver todas las visitas",
             "✅ Ver visitas activas",
-            "🏁 Ver visitas completadas"
+            "🏁 Ver visitas completadas",
+            "⬅️  Volver al menú principal"
         ]
-
-        if is_admin and bully_manager and user:
-            choices.append("❌ Cancelar visita")
-
-        choices.append("⬅️  Volver al menú principal")
 
         choice = questionary.select(
             "Seleccione una opción:",
@@ -281,16 +229,14 @@ def visitas_submenu(app, is_admin=False, bully_manager=None, user=None):
         elif choice == "🏁 Ver visitas completadas":
             show_all_visits(app, estado_filter='completada')
 
-        elif choice == "❌ Cancelar visita" and is_admin:
-            cancel_visit(app, bully_manager, user)
 
-
-def consultas_menu(app):
+def consultas_menu(app, bully_manager):
     """
-    Submenu for queries and reports (Admin only).
+    Submenu for queries and reports.
 
     Args:
         app: Flask application
+        bully_manager: BullyNode instance
     """
     while True:
         clear_screen()
@@ -318,7 +264,7 @@ def consultas_menu(app):
             return
 
         if choice == "👨‍⚕️ Ver todos los doctores":
-            show_doctors(app)
+            show_doctors(app, bully_manager)
 
         elif choice == "🏥 Ver todos los pacientes":
             show_patients(app)
@@ -327,4 +273,45 @@ def consultas_menu(app):
             show_beds(app)
 
         elif choice == "💼 Ver recursos disponibles":
-            show_available_resources(app)
+            show_available_resources(app, bully_manager)
+
+
+def paciente_menu(app, bully_manager, user):
+    """
+    Menu for patients.
+
+    Args:
+        app: Flask application
+        bully_manager: BullyNode instance
+        user: Current user (paciente)
+
+    Returns:
+        bool: True to continue, False to logout
+    """
+    while True:
+        show_menu_header(app, bully_manager, user)
+
+        choices = [
+            "📋 Ver mis visitas de emergencia",
+            "📊 Ver dashboard de métricas",
+            "🌐 Ver estado del cluster Bully",
+            "🚪 Cerrar sesión"
+        ]
+
+        choice = questionary.select(
+            "Seleccione una opción:",
+            choices=choices,
+            style=custom_style
+        ).ask()
+
+        if choice is None or choice == "🚪 Cerrar sesión":
+            return False
+
+        if choice == "📋 Ver mis visitas de emergencia":
+            show_patient_visits(app, user)
+
+        elif choice == "📊 Ver dashboard de métricas":
+            show_dashboard(app)
+
+        elif choice == "🌐 Ver estado del cluster Bully":
+            show_bully_status(app, bully_manager)

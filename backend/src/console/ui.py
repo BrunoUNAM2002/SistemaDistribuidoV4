@@ -144,11 +144,15 @@ def get_text_input(prompt_text, default=None):
         default: Default value
 
     Returns:
-        str: User input
+        str: User input (cleaned of CR/LF characters)
     """
     if default:
-        return Prompt.ask(prompt_text, default=default)
-    return Prompt.ask(prompt_text)
+        result = Prompt.ask(prompt_text, default=default)
+    else:
+        result = Prompt.ask(prompt_text)
+
+    # Remove any CR (\r) or trailing whitespace
+    return result.strip().replace('\r', '')
 
 def get_int_input(prompt_text, choices=None):
     """
@@ -196,7 +200,7 @@ def show_info(message):
 
 def pause():
     """Pause and wait for Enter key"""
-    console.input("\n[dim]Presione Enter para continuar...[/dim]")
+    _ = console.input("\n[dim]Presione Enter para continuar...[/dim]")
 
 def clear_screen():
     """Clear the console screen"""
