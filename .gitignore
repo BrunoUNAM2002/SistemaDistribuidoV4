@@ -1,4 +1,9 @@
-CLAUDE.md
+# Excluir todos los archivos markdown y shell scripts
+*.md
+*.sh
+
+# Archivos de sistema
+.DS_Store
 
 # Archivos de propuestas
 PROPUESTA.md
@@ -6,7 +11,3 @@ PROPUESTA.html
 PROPUESTA.pdf
 PROPUESTA_temp.md
 MEDICAL_WEBSITE_DESIGN_RESEARCH.md
-
-# Excluir todos los archivos markdown y shell scripts
-*.md
-*.sh
