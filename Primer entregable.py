@@ -15,10 +15,9 @@ DB_PATH = os.path.join(BASE_DIR, 'emergencias.db')
 # --- Configuración de Red (AJUSTA ESTO POR NODO) ---
 SERVER_PORT = 5555  # PUERTO DE ESTE NODO (cámbialo en cada nodo)
 NODOS_REMOTOS = [
-    # Ejemplo para nodo en 5555:
-    # ('localhost', 5556),
-    # ('localhost', 5557),
-    # ('localhost', 5558),
+    ('192.168.95.130', 5556),
+    ('192.168.95.131', 5557),
+    ('192.168.95.132', 5558),
 ]
 
 # --- Flag de Cierre ---
@@ -753,3 +752,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
