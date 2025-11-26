@@ -16,9 +16,9 @@ def poblar_datos_reales():
         cursor = conn.cursor()
         cursor.execute("PRAGMA foreign_keys = ON;")
 
-        print("Iniciando limpieza de base de datos...")
+        print("🧹 Limpiando y recreando base de datos...")
         
-        # Limpieza en orden de dependencias (de hijas a padres)
+        # ELIMINAR tablas en orden de dependencias
         tablas = [
             "VISITAS_EMERGENCIA",
             "CAMAS_ATENCION", 
@@ -31,14 +31,22 @@ def poblar_datos_reales():
         
         for tabla in tablas:
             try:
-                cursor.execute(f"DELETE FROM {tabla}")
-            except:
-                # Si la tabla no existe, continuar con la siguiente
-                continue
+                cursor.execute(f"DROP TABLE IF EXISTS {tabla}")
+                print(f"   - Tabla {tabla} eliminada")
+            except Exception as e:
+                print(f"   - Error eliminando {tabla}: {e}")
         
-        cursor.execute("DELETE FROM sqlite_sequence")
+        # RECREAR todas las tablas desde schema2.sql
+        schema_path = os.path.join(BASE_DIR, 'schema2.sql')
+        if os.path.exists(schema_path):
+            with open(schema_path, 'r') as f:
+                sql_script = f.read()
+            cursor.executescript(sql_script)
+            print("✅ Tablas recreadas desde schema2.sql")
+        else:
+            print("❌ schema2.sql no encontrado")
 
-        print("Insertando datos de prueba en el sistema...")
+        print("📦 Insertando datos de prueba...")
 
         # Datos de pacientes de ejemplo
         pacientes = [
@@ -68,7 +76,7 @@ def poblar_datos_reales():
             ('Lic. Roberto Gómez', 1, 1)
         )
 
-        # Configuración de camas disponibles
+        # Configuración de camas disponibles (SIN restricciones UNIQUE)
         for i in range(101, 106):
             cursor.execute(
                 "INSERT INTO CAMAS_ATENCION (numero, sala_id, ocupada) VALUES (?, ?, ?)",
@@ -89,30 +97,25 @@ def poblar_datos_reales():
 
         # Inicialización del sistema de consecutivos
         cursor.execute(
-            "CREATE TABLE IF NOT EXISTS CONSECUTIVOS_VISITAS (sala_id INTEGER PRIMARY KEY, ultimo_consecutivo INTEGER DEFAULT 0)"
-        )
-        cursor.execute(
             "INSERT OR REPLACE INTO CONSECUTIVOS_VISITAS (sala_id, ultimo_consecutivo) VALUES (?, ?)",
             (1, 0)
         )
 
         conn.commit()
         
-        print("\nBase de datos poblada exitosamente!")
-        print("\nCredenciales de acceso para pruebas:")
+        print("\n✅ Base de datos poblada exitosamente!")
+        print("\n🔧 Cambios aplicados:")
+        print("   - Tablas recreadas sin UNIQUE constraint en CAMAS_ATENCION.paciente_id")
+        print("   - Exclusión mutua manejada a nivel de aplicación")
+        
+        print("\n🔑 Credenciales de acceso para pruebas:")
         print("   Trabajador Social: usuario 'social1' - contraseña '1234'")
         print("   Doctores: usuario 'doctor1' - contraseña 'doctor1'")
         print("              usuario 'doctor2' - contraseña 'doctor2'")
         print("              usuario 'doctor3' - contraseña 'doctor3'")
-        
-        print(f"\nResumen de datos insertados:")
-        print(f"   - {len(pacientes)} pacientes registrados")
-        print(f"   - {len(doctores)} doctores en plantilla") 
-        print(f"   - 5 camas configuradas")
-        print(f"   - Sistema de consecutivos inicializado")
 
     except Exception as e:
-        print(f"Error durante la población de la base de datos: {e}")
+        print(f"❌ Error durante la población de la base de datos: {e}")
         if conn:
             conn.rollback()
     finally:
