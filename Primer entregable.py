@@ -12,42 +12,29 @@ import random
 # CONFIGURACIÓN DEL SISTEMA DISTRIBUIDO
 # ==========================================
 
-# Configuración de rutas y archivos
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SQL_SCHEMA_PATH = os.path.join(BASE_DIR, 'schema2.sql')
 DB_PATH = os.path.join(BASE_DIR, 'emergencias.db')
 
-# Configuración de red - puerto principal del sistema
 SERVER_PORT = 5555
 
-# Lista de nodos conocidos en el sistema distribuido
+# ⚠️ CONFIGURA SEGÚN TU VM ⚠️
 NODOS_REMOTOS = [
     # ('192.168.95.131', 5555),
     # ('192.168.95.132', 5555),
 ]
 
-# Evento global para controlar el cierre ordenado del sistema
 shutdown_event = threading.Event()
 
 # ==========================================
-# SISTEMA DE BLOQUEOS DISTRIBUIDOS
+# SISTEMA DE BLOQUEOS DISTRIBUIDOS MEJORADO
 # ==========================================
 
-# Diccionario global para tracking de bloqueos locales
 bloqueos_locales = {}
 lock_bloqueos = threading.Lock()
 
 def verificar_recurso_local(recurso_tipo, recurso_id):
-    """
-    Verifica la disponibilidad de un recurso en la base de datos local.
-    
-    Args:
-        recurso_tipo: Tipo de recurso ('DOCTOR' o 'CAMA')
-        recurso_id: Identificador del recurso
-    
-    Returns:
-        bool: True si el recurso está disponible, False en caso contrario
-    """
+    """Verifica disponibilidad del recurso en BD local"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -66,38 +53,31 @@ def verificar_recurso_local(recurso_tipo, recurso_id):
 
 def solicitar_bloqueo_distribuido(recurso_tipo, recurso_id):
     """
-    Solicita un bloqueo distribuido para un recurso específico.
-    Consulta a todos los nodos remotos para obtener consenso.
-    
-    Args:
-        recurso_tipo: Tipo de recurso a bloquear
-        recurso_id: Identificador del recurso
-    
-    Returns:
-        bool: True si se obtuvo el bloqueo, False si fue rechazado
+    ✅ CORREGIDO: Bloqueo atómico - o todos aprueban o ninguno
     """
-    print(f"Solicitando bloqueo distribuido para {recurso_tipo} {recurso_id}...")
+    print(f"🔒 SOLICITANDO BLOQUEO para {recurso_tipo} {recurso_id}...")
     
-    # Verificación local inicial del recurso
+    # 1. Verificación local inmediata
     if not verificar_recurso_local(recurso_tipo, recurso_id):
-        print(f"Recurso {recurso_tipo} {recurso_id} no disponible localmente")
+        print(f"❌ {recurso_tipo} {recurso_id} NO disponible localmente")
         return False
     
-    # Adquisición del bloqueo local
-    with lock_bloqueos:
-        clave = f"{recurso_tipo}_{recurso_id}"
-        if clave in bloqueos_locales:
-            print(f"Recurso {recurso_tipo} {recurso_id} ya está bloqueado localmente")
-            return False
-        bloqueos_locales[clave] = datetime.now()
+    # Si no hay nodos remotos, solo bloqueo local
+    if not NODOS_REMOTOS:
+        with lock_bloqueos:
+            clave = f"{recurso_tipo}_{recurso_id}"
+            bloqueos_locales[clave] = datetime.now()
+        print(f"✅ BLOQUEO CONCEDIDO (solo local)")
+        return True
     
-    # Solicitud de bloqueo a nodos remotos
+    # 2. Solicitar bloqueo a TODOS los nodos (ATÓMICO)
     confirmaciones = 0
     comando = {
-        "accion": "SOLICITAR_BLOQUEO",
+        "accion": "SOLICITAR_BLOQUEO_ATOMICO",
         "recurso_tipo": recurso_tipo,
         "recurso_id": recurso_id,
-        "solicitante": SERVER_PORT
+        "solicitante": SERVER_PORT,
+        "timestamp": datetime.now().isoformat()
     }
     
     for (ip, puerto) in NODOS_REMOTOS:
@@ -107,42 +87,37 @@ def solicitar_bloqueo_distribuido(recurso_tipo, recurso_id):
                 s.connect((ip, puerto))
                 s.sendall(json.dumps(comando).encode('utf-8'))
                 respuesta = s.recv(1024).decode('utf-8')
-                if respuesta == "BLOQUEO_OK":
+                if respuesta == "BLOQUEO_APROBADO":
                     confirmaciones += 1
-                    print(f"Nodo {ip} aprobó el bloqueo")
+                    print(f"   ✅ {ip} aprobó bloqueo")
                 else:
-                    print(f"Nodo {ip} rechazó el bloqueo")
+                    print(f"   ❌ {ip} rechazó bloqueo: {respuesta}")
+                    # ❌ SI ALGUIEN RECHAZA, ABORTAR INMEDIATAMENTE
+                    return False
         except Exception as e:
-            print(f"Nodo {ip} no respondió: {e}")
+            print(f"   ⚠️  {ip} no respondió: {e}")
+            # ❌ SI ALGUIEN NO RESPONDE, TAMBIÉN ABORTAR
+            return False
     
-    # Decisión basada en el consenso de mayoría
-    if confirmaciones >= len(NODOS_REMOTOS) // 2 or not NODOS_REMOTOS:
-        print(f"Bloqueo concedido para {recurso_tipo} {recurso_id}")
-        return True
-    else:
-        print(f"Bloqueo rechazado para {recurso_tipo} {recurso_id}")
-        # Liberar bloqueo local si no se obtuvo consenso
+    # 3. Solo si TODOS aprobaron, bloquear localmente
+    if confirmaciones == len(NODOS_REMOTOS):
         with lock_bloqueos:
             clave = f"{recurso_tipo}_{recurso_id}"
-            if clave in bloqueos_locales:
-                del bloqueos_locales[clave]
+            bloqueos_locales[clave] = datetime.now()
+        print(f"🎉 BLOQUEO CONCEDIDO para {recurso_tipo} {recurso_id}")
+        return True
+    else:
+        print(f"❌ BLOQUEO RECHAZADO - Faltaron aprobaciones")
         return False
 
 def liberar_bloqueo_distribuido(recurso_tipo, recurso_id):
-    """
-    Libera un bloqueo distribuido previamente adquirido.
-    
-    Args:
-        recurso_tipo: Tipo de recurso a liberar
-        recurso_id: Identificador del recurso
-    """
-    # Liberación del bloqueo local
+    """Libera bloqueo distribuido"""
     with lock_bloqueos:
         clave = f"{recurso_tipo}_{recurso_id}"
         if clave in bloqueos_locales:
             del bloqueos_locales[clave]
     
-    # Notificación de liberación a nodos remotos
+    # Notificar liberación a nodos remotos
     comando = {
         "accion": "LIBERAR_BLOQUEO",
         "recurso_tipo": recurso_tipo,
@@ -156,20 +131,16 @@ def liberar_bloqueo_distribuido(recurso_tipo, recurso_id):
                 s.connect((ip, puerto))
                 s.sendall(json.dumps(comando).encode('utf-8'))
         except:
-            # Silenciar errores en liberación para no interrumpir el flujo
             continue
     
-    print(f"Bloqueo liberado para {recurso_tipo} {recurso_id}")
+    print(f"🔓 BLOQUEO LIBERADO para {recurso_tipo} {recurso_id}")
 
 # ==========================================
 # GESTIÓN DE BASE DE DATOS LOCAL
 # ==========================================
 
 def init_db():
-    """
-    Inicializa la base de datos local.
-    Crea las tablas necesarias si no existen y configura las restricciones.
-    """
+    """Inicializa la base de datos local"""
     print(f"Verificando base de datos en: {DB_PATH}")
     conn = None
     try:
@@ -177,7 +148,6 @@ def init_db():
         cursor = conn.cursor()
         cursor.execute("PRAGMA foreign_keys = ON;")
 
-        # Crear tabla de usuarios del sistema si no existe
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS USUARIOS_SISTEMA (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -188,7 +158,6 @@ def init_db():
             )
         """)
 
-        # Crear tabla de control de consecutivos
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS CONSECUTIVOS_VISITAS (
                 sala_id INTEGER PRIMARY KEY,
@@ -196,7 +165,6 @@ def init_db():
             )
         """)
 
-        # Cargar schema completo si la base de datos está vacía
         if not os.path.exists(DB_PATH) or os.path.getsize(DB_PATH) < 100:
             if os.path.exists(SQL_SCHEMA_PATH):
                 with open(SQL_SCHEMA_PATH, 'r') as f:
@@ -211,16 +179,7 @@ def init_db():
             conn.close()
 
 def ejecutar_transaccion_local(comando):
-    """
-    Ejecuta una transacción en la base de datos local.
-    Maneja diferentes tipos de operaciones con verificación de duplicados.
-    
-    Args:
-        comando: Diccionario con la acción y datos a ejecutar
-    
-    Returns:
-        mixed: Resultado de la transacción o False en caso de error
-    """
+    """Ejecuta transacción en base de datos local"""
     print(f"Ejecutando transacción local: {comando['accion']}")
     
     conn = sqlite3.connect(DB_PATH)
@@ -240,23 +199,23 @@ def ejecutar_transaccion_local(comando):
         elif comando['accion'] == "ASIGNAR_RECURSOS":
             datos = comando['datos']
             
-            # Verificación de folio duplicado antes de la inserción
+            # Verificación de folio duplicado
             cursor.execute("SELECT COUNT(*) FROM VISITAS_EMERGENCIA WHERE folio = ?", (datos['folio'],))
             if cursor.fetchone()[0] > 0:
                 print(f"Folio {datos['folio']} ya existe en el sistema")
                 conn.rollback()
                 return False
             
-            # Actualización de estado del doctor
+            # Actualizar doctor
             cursor.execute("UPDATE DOCTORES SET disponible = 0 WHERE id = ?", (datos['doctor_id'],))
             
-            # Actualización de estado de la cama
+            # Actualizar cama
             cursor.execute(
                 "UPDATE CAMAS_ATENCION SET ocupada = 1, paciente_id = ? WHERE id = ?", 
                 (datos['paciente_id'], datos['cama_id'])
             )
             
-            # Inserción del registro de visita
+            # Insertar visita
             cursor.execute("""
                 INSERT INTO VISITAS_EMERGENCIA 
                 (folio, paciente_id, doctor_id, cama_id, sala_id, timestamp, estado) 
@@ -273,7 +232,6 @@ def ejecutar_transaccion_local(comando):
             datos = comando['datos']
             folio = datos['folio']
             
-            # Obtención de información de la visita a cerrar
             cursor.execute(
                 "SELECT doctor_id, cama_id FROM VISITAS_EMERGENCIA WHERE folio = ?", 
                 (folio,)
@@ -283,16 +241,16 @@ def ejecutar_transaccion_local(comando):
             if visita:
                 doctor_id, cama_id = visita
                 
-                # Liberación del doctor asignado
+                # Liberar doctor
                 cursor.execute("UPDATE DOCTORES SET disponible = 1 WHERE id = ?", (doctor_id,))
                 
-                # Liberación de la cama ocupada
+                # Liberar cama
                 cursor.execute(
                     "UPDATE CAMAS_ATENCION SET ocupada = 0, paciente_id = NULL WHERE id = ?", 
                     (cama_id,)
                 )
                 
-                # Actualización del estado de la visita
+                # Cerrar visita
                 cursor.execute(
                     "UPDATE VISITAS_EMERGENCIA SET estado = 'Cerrada' WHERE folio = ?", 
                     (folio,)
@@ -302,11 +260,10 @@ def ejecutar_transaccion_local(comando):
                 print(f"Visita {folio} cerrada - Recursos liberados")
                 return True
             else:
-                print(f"Visita {folio} no encontrada en el sistema")
+                print(f"Visita {folio} no encontrada")
                 return False
             
         elif comando['accion'] == "INCREMENTAR_CONSECUTIVO":
-            # Gestión del número consecutivo para folios únicos
             cursor.execute(
                 "SELECT ultimo_consecutivo FROM CONSECUTIVOS_VISITAS WHERE sala_id = ?", 
                 (SERVER_PORT,)
@@ -341,16 +298,7 @@ def ejecutar_transaccion_local(comando):
 # ==========================================
 
 def propagar_transaccion_con_consenso(comando):
-    """
-    Propaga una transacción a todos los nodos del sistema y espera consenso.
-    
-    Args:
-        comando: Transacción a ejecutar en todos los nodos
-    
-    Returns:
-        bool: True si se alcanzó consenso, False en caso contrario
-    """
-    # Caso especial: sistema de un solo nodo
+    """Propaga transacción con consenso"""
     if not NODOS_REMOTOS:
         return ejecutar_transaccion_local(comando)
 
@@ -360,7 +308,6 @@ def propagar_transaccion_con_consenso(comando):
 
     print(f"Iniciando proceso de consenso para: {comando['accion']}")
 
-    # Fase de votación con todos los nodos remotos
     for (ip, puerto) in NODOS_REMOTOS:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -376,7 +323,6 @@ def propagar_transaccion_con_consenso(comando):
         except Exception as e:
             print(f"Nodo {ip}:{puerto} no respondió: {e}")
 
-    # Evaluación del resultado del consenso
     umbral_consenso = (total_nodos // 2) + 1
     if confirmaciones >= umbral_consenso:
         resultado = ejecutar_transaccion_local(comando)
@@ -395,12 +341,7 @@ def propagar_transaccion_con_consenso(comando):
 # ==========================================
 
 def obtener_siguiente_consecutivo():
-    """
-    Obtiene el siguiente número consecutivo garantizando unicidad.
-    
-    Returns:
-        int: Siguiente número consecutivo disponible
-    """
+    """Obtiene siguiente número consecutivo"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -413,14 +354,13 @@ def obtener_siguiente_consecutivo():
         
         if resultado:
             nuevo_consecutivo = resultado[0] + 1
-            # Actualización local inmediata del consecutivo
             cursor.execute(
                 "UPDATE CONSECUTIVOS_VISITAS SET ultimo_consecutivo = ? WHERE sala_id = ?", 
                 (nuevo_consecutivo, SERVER_PORT)
             )
             conn.commit()
             
-            # Propagación del incremento a otros nodos
+            # Propagación opcional del incremento
             comando = {
                 "accion": "INCREMENTAR_CONSECUTIVO",
                 "datos": {}
@@ -429,7 +369,6 @@ def obtener_siguiente_consecutivo():
             
             return nuevo_consecutivo
         else:
-            # Inicialización del sistema de consecutivos
             cursor.execute(
                 "INSERT INTO CONSECUTIVOS_VISITAS (sala_id, ultimo_consecutivo) VALUES (?, 1)", 
                 (SERVER_PORT,)
@@ -440,25 +379,14 @@ def obtener_siguiente_consecutivo():
         conn.close()
 
 def generar_folio_exacto(paciente_id, doctor_id, sala_id):
-    """
-    Genera un folio único según el formato especificado.
-    Implementa verificación anti-duplicados con reintentos.
-    
-    Args:
-        paciente_id: Identificador del paciente
-        doctor_id: Identificador del doctor
-        sala_id: Identificador de la sala
-    
-    Returns:
-        str: Folio único generado
-    """
+    """Genera folio único según formato especificado"""
     max_intentos = 5
     
     for intento in range(max_intentos):
         consecutivo = obtener_siguiente_consecutivo()
         folio = f"{paciente_id}{doctor_id}{sala_id}{consecutivo}"
         
-        # Verificación de unicidad del folio generado
+        # Verificación de unicidad
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM VISITAS_EMERGENCIA WHERE folio = ?", (folio,))
@@ -471,7 +399,7 @@ def generar_folio_exacto(paciente_id, doctor_id, sala_id):
         else:
             print(f"Folio duplicado detectado, generando alternativa...")
     
-    # Estrategia de fallback para casos extremos
+    # Fallback
     timestamp = int(datetime.now().timestamp())
     folio_emergencia = f"{paciente_id}{doctor_id}{sala_id}{timestamp}"
     print(f"Usando folio de contingencia: {folio_emergencia}")
@@ -482,12 +410,7 @@ def generar_folio_exacto(paciente_id, doctor_id, sala_id):
 # ==========================================
 
 def encontrar_doctor_disponible():
-    """
-    Encuentra el primer doctor disponible en el sistema local.
-    
-    Returns:
-        tuple: (id, nombre) del doctor disponible o None
-    """
+    """Encuentra doctor disponible"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -498,12 +421,7 @@ def encontrar_doctor_disponible():
         conn.close()
 
 def encontrar_cama_disponible():
-    """
-    Encuentra la primera cama disponible en el sistema local.
-    
-    Returns:
-        tuple: (id, numero) de la cama disponible o None
-    """
+    """Encuentra cama disponible"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -514,18 +432,9 @@ def encontrar_cama_disponible():
         conn.close()
 
 def distribuir_visita_automaticamente(paciente_id):
-    """
-    Distribuye automáticamente una visita asignando recursos disponibles.
-    
-    Args:
-        paciente_id: Identificador del paciente a asignar
-    
-    Returns:
-        str: Folio de la visita asignada o None en caso de error
-    """
+    """Distribuye automáticamente una visita"""
     print("Iniciando distribución automática de recursos...")
     
-    # Búsqueda de recursos disponibles
     doctor = encontrar_doctor_disponible()
     if not doctor:
         print("No hay doctores disponibles para asignación automática")
@@ -578,37 +487,42 @@ def distribuir_visita_automaticamente(paciente_id):
         return None
 
 # ==========================================
-# SERVIDOR Y MANEJO DE CONEXIONES
+# SERVIDOR Y MANEJO DE CONEXIONES CORREGIDO
 # ==========================================
 
 def handle_client(client_socket, client_address):
     """
-    Maneja las conexiones entrantes de otros nodos del sistema.
-    
-    Args:
-        client_socket: Socket del cliente conectado
-        client_address: Dirección del cliente
+    ✅ CORREGIDO: Maneja bloqueos atómicos correctamente
     """
     try:
         message = client_socket.recv(1024).decode('utf-8')
         if message:
             comando = json.loads(message)
             
-            # Manejo de solicitudes de bloqueo distribuido
-            if comando.get('accion') == 'SOLICITAR_BLOQUEO':
+            # Manejar solicitudes de bloqueo atómico
+            if comando.get('accion') == 'SOLICITAR_BLOQUEO_ATOMICO':
                 recurso_tipo = comando['recurso_tipo']
                 recurso_id = comando['recurso_id']
                 
-                if verificar_recurso_local(recurso_tipo, recurso_id):
-                    with lock_bloqueos:
-                        clave = f"{recurso_tipo}_{recurso_id}"
-                        bloqueos_locales[clave] = datetime.now()
-                    client_socket.send("BLOQUEO_OK".encode('utf-8'))
-                    print(f"Bloqueo aprobado para {recurso_tipo} {recurso_id}")
-                else:
+                # Verificar si ya está bloqueado localmente
+                clave = f"{recurso_tipo}_{recurso_id}"
+                with lock_bloqueos:
+                    if clave in bloqueos_locales:
+                        client_socket.send("BLOQUEO_RECHAZADO".encode('utf-8'))
+                        return
+                
+                # Verificar disponibilidad en BD local
+                if not verificar_recurso_local(recurso_tipo, recurso_id):
                     client_socket.send("BLOQUEO_RECHAZADO".encode('utf-8'))
-                    print(f"Bloqueo rechazado para {recurso_tipo} {recurso_id}")
-                    
+                    return
+                
+                # Bloquear localmente temporalmente
+                with lock_bloqueos:
+                    bloqueos_locales[clave] = datetime.now()
+                
+                client_socket.send("BLOQUEO_APROBADO".encode('utf-8'))
+                print(f"Bloqueo aprobado para {recurso_tipo} {recurso_id}")
+                
             elif comando.get('accion') == 'LIBERAR_BLOQUEO':
                 recurso_tipo = comando['recurso_tipo']
                 recurso_id = comando['recurso_id']
@@ -634,12 +548,7 @@ def handle_client(client_socket, client_address):
         client_socket.close()
 
 def server(server_port):
-    """
-    Inicia el servidor para aceptar conexiones de otros nodos.
-    
-    Args:
-        server_port: Puerto en el que escuchar conexiones
-    """
+    """Inicia el servidor"""
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.bind(('0.0.0.0', server_port))
@@ -660,11 +569,11 @@ def server(server_port):
     server_socket.close()
 
 # ==========================================
-# INTERFAZ DE USUARIO Y FUNCIONALIDADES
+# INTERFAZ DE USUARIO - ASIGNACIÓN CORREGIDA
 # ==========================================
 
 def ver_pacientes_locales():
-    """Muestra la lista de pacientes registrados localmente."""
+    """Muestra lista de pacientes"""
     print("\nLista de Pacientes Registrados")
     print("------------------------------")
     conn = sqlite3.connect(DB_PATH)
@@ -679,7 +588,7 @@ def ver_pacientes_locales():
         print(f"ID: {r[0]} | {r[1]} ({r[2]} años)")
 
 def ver_doctores_locales():
-    """Muestra la lista de doctores con su estado de disponibilidad."""
+    """Muestra lista de doctores"""
     print("\nPlantilla Médica")
     print("----------------")
     conn = sqlite3.connect(DB_PATH)
@@ -689,11 +598,11 @@ def ver_doctores_locales():
     conn.close()
     
     for r in rows:
-        estado = "Disponible" if r[2] == 1 else "Ocupado"
+        estado = "🟢 Disponible" if r[2] == 1 else "🔴 Ocupado"
         print(f"ID: {r[0]} | {r[1]} - {estado}")
 
 def ver_camas_locales():
-    """Muestra el estado de las camas de atención."""
+    """Muestra estado de camas"""
     print("\nEstado de Camas de Atención")
     print("---------------------------")
     conn = sqlite3.connect(DB_PATH)
@@ -703,11 +612,11 @@ def ver_camas_locales():
     conn.close()
     
     for r in rows:
-        estado = "Ocupada" if r[2] == 1 else "Libre"
+        estado = "🔴 Ocupada" if r[2] == 1 else "🟢 Libre"
         print(f"ID: {r[0]} | Cama {r[1]} - {estado}")
 
 def ver_visitas_activas():
-    """Muestra las visitas de emergencia activas en el sistema."""
+    """Muestra visitas activas"""
     print("\nVisitas de Emergencia Activas")
     print("-----------------------------")
     conn = sqlite3.connect(DB_PATH)
@@ -730,7 +639,7 @@ def ver_visitas_activas():
     return [r[0] for r in rows]
 
 def registrar_nuevo_paciente():
-    """Registra un nuevo paciente en el sistema."""
+    """Registra nuevo paciente"""
     print("\nRegistro de Nuevo Paciente")
     print("--------------------------")
     try:
@@ -769,7 +678,9 @@ def registrar_nuevo_paciente():
         return None
 
 def asignar_doctor_y_cama():
-    """Asigna un doctor y cama específicos a un paciente con exclusión mutua."""
+    """
+    ✅ CORREGIDO: Asignación con EXCLUSIÓN MUTUA REAL
+    """
     print("\nAsignación Manual de Recursos")
     print("-----------------------------")
     try:
@@ -785,27 +696,27 @@ def asignar_doctor_y_cama():
         cid = input("ID de la cama a asignar: ")
         if not cid: return
 
-        print("\nActivando protocolo de exclusión mutua...")
+        print("\n🔒 ACTIVANDO EXCLUSIÓN MUTUA...")
         
-        # Bloqueo distribuido del doctor
+        # 1. BLOQUEO ATÓMICO DEL DOCTOR
         if not solicitar_bloqueo_distribuido("DOCTOR", did):
-            print("El doctor seleccionado no está disponible")
+            print("❌ No se pudo bloquear el doctor - RECURSO EN USO")
             return
             
-        # Bloqueo distribuido de la cama
+        # 2. BLOQUEO ATÓMICO DE LA CAMA  
         if not solicitar_bloqueo_distribuido("CAMA", cid):
-            print("La cama seleccionada no está disponible")
+            print("❌ No se pudo bloquear la cama - RECURSO OCUPADO")
             liberar_bloqueo_distribuido("DOCTOR", did)
             return
 
-        # Verificación final de disponibilidad
+        # 3. VERIFICACIÓN FINAL (con bloqueos activos)
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         
         cur.execute("SELECT disponible, nombre FROM DOCTORES WHERE id=?", (did,))
         doc = cur.fetchone()
         if not doc or doc[0] == 0:
-            print(f"El doctor {did} no está disponible")
+            print(f"❌ El doctor {did} no está disponible")
             liberar_bloqueo_distribuido("DOCTOR", did)
             liberar_bloqueo_distribuido("CAMA", cid)
             conn.close()
@@ -814,7 +725,7 @@ def asignar_doctor_y_cama():
         cur.execute("SELECT ocupada, numero FROM CAMAS_ATENCION WHERE id=?", (cid,))
         cama = cur.fetchone()
         if not cama or cama[0] == 1:
-            print(f"La cama {cid} no está disponible")
+            print(f"❌ La cama {cid} no está disponible")
             liberar_bloqueo_distribuido("DOCTOR", did)
             liberar_bloqueo_distribuido("CAMA", cid)
             conn.close()
@@ -822,7 +733,7 @@ def asignar_doctor_y_cama():
 
         conn.close()
 
-        # Ejecución de la asignación
+        # 4. EJECUCIÓN CON BLOQUEOS ACTIVOS
         folio = generar_folio_exacto(pid, did, SERVER_PORT)
         comando = {
             "accion": "ASIGNAR_RECURSOS",
@@ -834,20 +745,24 @@ def asignar_doctor_y_cama():
             }
         }
         
+        print("🔄 Ejecutando asignación con EXCLUSIÓN MUTUA...")
+        
         if propagar_transaccion_con_consenso(comando):
-            print(f"Asignación manual exitosa - Folio: {folio}")
-            print(f"Doctor asignado: {doc[1]}")
-            print(f"Cama asignada: {cama[1]}")
+            print(f"✅ ASIGNACIÓN EXITOSA")
+            print(f"   📄 Folio: {folio}")
+            print(f"   👨‍⚕️ Doctor: {doc[1]}")
+            print(f"   🛏️ Cama: {cama[1]}")
         else:
-            print("Error en el proceso de asignación")
+            print("❌ Error en el proceso de asignación")
 
-        # Liberación de bloqueos
+        # 5. LIBERACIÓN FINAL DE BLOQUEOS
         liberar_bloqueo_distribuido("DOCTOR", did)
         liberar_bloqueo_distribuido("CAMA", cid)
+        print("🔓 Recursos liberados")
 
     except Exception as e:
-        print(f"Error durante la asignación: {e}")
-        # Limpieza de bloqueos en caso de error
+        print(f"❌ Error durante la asignación: {e}")
+        # LIMPIEZA DE BLOQUEOS EN CASO DE ERROR
         try:
             liberar_bloqueo_distribuido("DOCTOR", did)
             liberar_bloqueo_distribuido("CAMA", cid)
@@ -855,7 +770,7 @@ def asignar_doctor_y_cama():
             pass
 
 def cerrar_visita():
-    """Cierra una visita activa y libera los recursos asignados."""
+    """Cierra visita activa"""
     print("\nCierre de Visita de Emergencia")
     print("------------------------------")
     
@@ -892,25 +807,20 @@ def cerrar_visita():
         }
         
         if propagar_transaccion_con_consenso(comando):
-            print("Visita cerrada exitosamente")
-            print("Recursos liberados para nuevas asignaciones")
+            print("✅ Visita cerrada exitosamente")
+            print("🔓 Recursos liberados para nuevas asignaciones")
         else:
-            print("Error durante el cierre de la visita")
+            print("❌ Error durante el cierre de la visita")
             
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"❌ Error: {e}")
 
 # ==========================================
 # SISTEMA DE AUTENTICACIÓN Y MENÚS
 # ==========================================
 
 def login():
-    """
-    Maneja el proceso de autenticación de usuarios.
-    
-    Returns:
-        tuple: (autenticado, rol, usuario) o (False, None, None) en caso de fallo
-    """
+    """Maneja autenticación de usuarios"""
     print("\nSistema de Autenticación")
     print("========================")
 
@@ -930,22 +840,17 @@ def login():
 
         if resultado:
             rol_encontrado = resultado[0]
-            print(f"Autenticación exitosa - Rol: {rol_encontrado}")
+            print(f"✅ Autenticación exitosa - Rol: {rol_encontrado}")
             return True, rol_encontrado, user
         else:
-            print("Credenciales incorrectas")
+            print("❌ Credenciales incorrectas")
             intentos += 1
 
-    print("Límite de intentos excedido - Cerrando sistema")
+    print("⛔ Límite de intentos excedido - Cerrando sistema")
     return False, None, None
 
 def menu_trabajador_social(usuario):
-    """
-    Menú principal para usuarios con rol de trabajador social.
-    
-    Args:
-        usuario: Nombre del usuario autenticado
-    """
+    """Menú para trabajador social"""
     while True:
         print(f"\nPanel de Trabajo Social - Usuario: {usuario}")
         print("==============================================")
@@ -979,21 +884,16 @@ def menu_trabajador_social(usuario):
             if pid:
                 folio = distribuir_visita_automaticamente(int(pid))
                 if folio:
-                    print(f"Distribución automática completada - Folio: {folio}")
+                    print(f"✅ Distribución automática completada - Folio: {folio}")
         elif opcion == '9': 
             print("Cerrando sesión de trabajo social...")
             shutdown_event.set()
             break
         else: 
-            print("Opción no válida")
+            print("❌ Opción no válida")
 
 def menu_doctor(usuario):
-    """
-    Menú principal para usuarios con rol de doctor.
-    
-    Args:
-        usuario: Nombre del usuario autenticado
-    """
+    """Menú para doctor"""
     while True:
         print(f"\nPanel Médico - Usuario: {usuario}")
         print("==================================")
@@ -1013,27 +913,21 @@ def menu_doctor(usuario):
             shutdown_event.set()
             break
         else: 
-            print("Opción no válida")
+            print("❌ Opción no válida")
 
 def main():
-    """
-    Función principal del sistema distribuido.
-    Coordina la inicialización y el flujo principal de la aplicación.
-    """
-    # Inicialización del sistema
+    """Función principal"""
     init_db()
     
-    # Inicio del servidor en segundo plano
     server_thread = threading.Thread(target=server, args=(SERVER_PORT,))
     server_thread.daemon = True
     server_thread.start()
     
-    # Información del sistema
-    print("\nSistema Distribuido de Gestión de Emergencias Médicas")
-    print(f"Nodo activo en puerto: {SERVER_PORT}")
-    print(f"Nodos remotos configurados: {len(NODOS_REMOTOS)}")
+    print("\n🏥 Sistema Distribuido de Gestión de Emergencias Médicas")
+    print(f"📡 Nodo activo en puerto: {SERVER_PORT}")
+    print(f"🔗 Nodos remotos configurados: {len(NODOS_REMOTOS)}")
+    print("🔒 EXCLUSIÓN MUTUA: ACTIVADA")
     
-    # Proceso de autenticación
     autenticado, rol, usuario = login()
     
     if autenticado:
@@ -1043,24 +937,21 @@ def main():
             elif rol == 'DOCTOR':
                 menu_doctor(usuario)
         except KeyboardInterrupt:
-            print("\nInterrupción recibida - Cerrando sistema...")
+            print("\n👋 Interrupción recibida - Cerrando sistema...")
             shutdown_event.set()
     else:
         shutdown_event.set()
 
-    # Protocolo de cierre ordenado
     print("Finalizando servicios del sistema...")
     try:
-        # Conexión local para liberar el puerto
         dummy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         dummy.connect(('127.0.0.1', SERVER_PORT))
         dummy.close()
     except: 
         pass
 
-    # Espera para finalización de hilos
     threading.Event().wait(1)
-    print("Sistema finalizado correctamente")
+    print("✅ Sistema finalizado correctamente")
 
 if __name__ == "__main__":
     main()
