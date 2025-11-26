@@ -1,6 +1,7 @@
+-- Habilita el uso de claves foráneas en SQLite
 PRAGMA foreign_keys = ON;
 
--- 1. TABLA DE PACIENTES
+-- Tabla de pacientes que almacena información demográfica básica
 CREATE TABLE IF NOT EXISTS PACIENTES (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     nombre TEXT NOT NULL,
@@ -9,7 +10,7 @@ CREATE TABLE IF NOT EXISTS PACIENTES (
     contacto TEXT
 );
 
--- 2. TABLA DE DOCTORES
+-- Tabla de doctores con información de disponibilidad y asignación de sala
 CREATE TABLE IF NOT EXISTS DOCTORES (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     nombre TEXT NOT NULL,
@@ -17,7 +18,7 @@ CREATE TABLE IF NOT EXISTS DOCTORES (
     disponible INTEGER DEFAULT 1
 );
 
--- 3. TABLA DE TRABAJADORES SOCIALES
+-- Tabla de trabajadores sociales del sistema
 CREATE TABLE IF NOT EXISTS TRABAJADORES_SOCIALES (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     nombre TEXT NOT NULL,
@@ -25,7 +26,7 @@ CREATE TABLE IF NOT EXISTS TRABAJADORES_SOCIALES (
     activo INTEGER DEFAULT 1
 );
 
--- 4. TABLA DE CAMAS DE ATENCIÓN
+-- Tabla de camas de atención con estado de ocupación
 CREATE TABLE IF NOT EXISTS CAMAS_ATENCION (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     numero INTEGER NOT NULL,
@@ -36,7 +37,7 @@ CREATE TABLE IF NOT EXISTS CAMAS_ATENCION (
     FOREIGN KEY (paciente_id) REFERENCES PACIENTES(id)
 );
 
--- 5. TABLA DE VISITAS DE EMERGENCIA
+-- Tabla principal de visitas de emergencia que registra todo el proceso
 CREATE TABLE IF NOT EXISTS VISITAS_EMERGENCIA (
     folio TEXT PRIMARY KEY,
     paciente_id INTEGER NOT NULL,
@@ -53,7 +54,7 @@ CREATE TABLE IF NOT EXISTS VISITAS_EMERGENCIA (
     FOREIGN KEY (trabajador_social_id) REFERENCES TRABAJADORES_SOCIALES(id)
 );
 
--- 6. TABLA DE USUARIOS DEL SISTEMA
+-- Tabla de usuarios del sistema para autenticación y control de acceso
 CREATE TABLE IF NOT EXISTS USUARIOS_SISTEMA (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE NOT NULL,
@@ -62,7 +63,7 @@ CREATE TABLE IF NOT EXISTS USUARIOS_SISTEMA (
     id_personal INTEGER
 );
 
--- 7. TABLA DE CONSECUTIVOS (NUEVA)
+-- Tabla para control de números consecutivos en un ambiente distribuido
 CREATE TABLE IF NOT EXISTS CONSECUTIVOS_VISITAS (
     sala_id INTEGER PRIMARY KEY,
     ultimo_consecutivo INTEGER DEFAULT 0
